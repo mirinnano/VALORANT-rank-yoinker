@@ -139,7 +139,7 @@ fn kill_time(kill: &Value) -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn round_kills(round: &Value) -> Vec<&Value> {
+pub fn round_kills(round: &Value) -> Vec<&Value> {
     let mut kills: Vec<&Value> =
         list(round, "playerStats").iter().flat_map(|player| list(player, "kills")).collect();
     kills.sort_by_key(|kill| kill_time(kill));
@@ -160,18 +160,18 @@ fn first_half_attackers<'a>(details: &'a Value, teams: &HashMap<&str, &'a str>) 
     })
 }
 
-/// 味方が全滅して自分だけが残る場面があったか。キルの順に生存者を減らして調べる。
-fn entered_clutch(puuid: &str, team: Option<&str>, teams: &HashMap<&str, &str>, kills: &[&Value]) -> bool {
-    let Some(team) = team else { return false };
+/// 味方が全滅して自分だけが残った場面の、残りの相手の人数を返す。キルの順に生存者を減らして調べる。
+pub fn clutch_opponents(puuid: &str, team: Option<&str>, teams: &HashMap<&str, &str>, kills: &[&Value]) -> Option<u32> {
+    let team = team?;
     let mut allies = teams.values().filter(|other| **other == team).count();
     let mut enemies = teams.len() - allies;
     if allies < 2 {
-        return false;
+        return None;
     }
     for kill in kills {
         let Some(victim) = text(kill, "victim") else { continue };
         if victim == puuid {
-            return false;
+            return None;
         }
         if teams.get(victim).copied() == Some(team) {
             allies = allies.saturating_sub(1);
@@ -179,10 +179,10 @@ fn entered_clutch(puuid: &str, team: Option<&str>, teams: &HashMap<&str, &str>, 
             enemies = enemies.saturating_sub(1);
         }
         if allies == 1 {
-            return enemies > 0;
+            return (enemies > 0).then_some(enemies as u32);
         }
     }
-    false
+    None
 }
 
 /// プレイヤーの指標を計算する。試合に参加していなければ `None`。
@@ -295,7 +295,7 @@ pub fn player_metrics(puuid: &str, match_id: &str, details: &Value, catalog: &Ga
         metrics.kast_rounds += u32::from(own_kills > 0 || assisted || death.is_none() || traded);
         metrics.survived_rounds += u32::from(death.is_none());
         metrics.traded_deaths += u32::from(traded);
-        if entered_clutch(puuid, team, &teams, &kills) {
+        if clutch_opponents(puuid, team, &teams, &kills).is_some() {
             metrics.clutch.add(round_won);
         }
     }

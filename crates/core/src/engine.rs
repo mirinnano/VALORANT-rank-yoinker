@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{watch, OnceCell};
+use tokio::sync::{watch, Notify, OnceCell};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -583,6 +583,14 @@ impl Engine {
     pub async fn run(mut self, events: watch::Sender<AppEvent>) {
         self.progress = Some(events.clone());
         let mut last_state = None;
+
+        // 状態の変化はすぐ受け取り、切断に備えて定期確認も続ける。
+        let wake = Arc::new(Notify::new());
+        tokio::spawn({
+            let source = self.source.clone();
+            let wake = wake.clone();
+            async move { source.watch_events(wake).await }
+        });
         loop {
             let delay = match self.step().await {
                 Ok(snapshot) => {
@@ -605,7 +613,10 @@ impl Engine {
                     RECONNECT
                 }
             };
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                () = wake.notified() => tracing::info!("状態の変化を受信"),
+            }
         }
     }
 }

@@ -25,7 +25,11 @@ async fn main() {
         std::fs::write(path, text).expect("write");
         return;
     }
-    let catalog = GameCatalog { agents: scenario.agents.clone(), maps: scenario.maps.clone() };
+    let catalog = GameCatalog {
+        agents: scenario.agents.clone(),
+        maps: scenario.maps.clone(),
+        weapons: scenario.weapons.clone(),
+    };
     let review = analyze(demo::OWN, &scenario.matches["history-0"], &catalog);
     let source = Arc::new(ReplaySource::new(scenario));
     let diagnostics = vry_core::diagnostics::run(source.as_ref()).await;

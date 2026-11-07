@@ -30,6 +30,7 @@ pub struct Scenario {
     pub content: Value,
     pub agents: HashMap<String, String>,
     pub maps: HashMap<String, String>,
+    pub weapons: HashMap<String, String>,
 }
 
 pub struct ReplaySource {
@@ -147,6 +148,10 @@ impl RiotSource for ReplaySource {
     }
 
     async fn catalog(&self) -> Result<GameCatalog> {
-        Ok(GameCatalog { agents: self.scenario.agents.clone(), maps: self.scenario.maps.clone() })
+        Ok(GameCatalog {
+            agents: self.scenario.agents.clone(),
+            maps: self.scenario.maps.clone(),
+            weapons: self.scenario.weapons.clone(),
+        })
     }
 }

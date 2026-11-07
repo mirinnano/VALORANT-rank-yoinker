@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS encounters (
     PRIMARY KEY (puuid, match_id)
 );
 CREATE INDEX IF NOT EXISTS encounters_seen ON encounters (seen_at_ms DESC);
-CREATE TABLE IF NOT EXISTS match_reviews (
+CREATE TABLE IF NOT EXISTS match_reviews_v2 (
     match_id TEXT PRIMARY KEY,
     review TEXT NOT NULL
 );
@@ -163,14 +163,14 @@ impl Store {
     pub fn cached_review(&self, match_id: &str) -> Result<Option<serde_json::Value>> {
         let text: Option<String> = self
             .db
-            .query_row("SELECT review FROM match_reviews WHERE match_id = ?1", [match_id], |row| row.get(0))
+            .query_row("SELECT review FROM match_reviews_v2 WHERE match_id = ?1", [match_id], |row| row.get(0))
             .optional()?;
         text.map(|text| serde_json::from_str(&text).map_err(Into::into)).transpose()
     }
 
     pub fn cache_review(&self, match_id: &str, review: &MatchReview) -> Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO match_reviews (match_id, review) VALUES (?1, ?2)",
+            "INSERT OR REPLACE INTO match_reviews_v2 (match_id, review) VALUES (?1, ?2)",
             params![match_id, serde_json::to_string(review)?],
         )?;
         Ok(())
@@ -447,7 +447,7 @@ mod tests {
         let review = MatchReview {
             match_id: "m".into(), map: None, started_ms: 0, length_ms: 0, won: Some(true),
             own_score: 13, enemy_score: 5, own: line.clone(), team_acs: 0, team_adr: 0,
-            lines: vec![line], rounds: Vec::new(), findings: Vec::new(),
+            lines: vec![line], rounds: Vec::new(), findings: Vec::new(), highlights: Vec::new(),
         };
         store.cache_review("m", &review).unwrap();
         assert_eq!(store.cached_review("m").unwrap().unwrap()["own_score"], 13);

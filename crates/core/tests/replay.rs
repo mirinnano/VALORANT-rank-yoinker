@@ -158,6 +158,7 @@ async fn review_of_demo_match_hides_every_other_players_identity() {
     let review = analyze(demo::OWN, details, &GameCatalog {
         agents: scenario.agents.clone(),
         maps: scenario.maps.clone(),
+        weapons: scenario.weapons.clone(),
     })
     .unwrap();
     assert_eq!(review.lines.len(), 10);

@@ -5,6 +5,8 @@ use crate::presence::Presence;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Default)]
 pub struct GameCatalog {
@@ -12,6 +14,8 @@ pub struct GameCatalog {
     pub agents: HashMap<String, String>,
     /// 小文字の mapUrl から表示名。
     pub maps: HashMap<String, String>,
+    /// 小文字の武器 UUID から表示名。
+    pub weapons: HashMap<String, String>,
 }
 
 #[async_trait]
@@ -34,4 +38,12 @@ pub trait RiotSource: Send + Sync {
     async fn match_details(&self, match_id: &str) -> Result<Option<Value>>;
     async fn content(&self) -> Result<Value>;
     async fn catalog(&self) -> Result<GameCatalog>;
+
+    /// 状態の変化を受け取るたびに `wake` を起こす。対応しないデータ源では何もしない。
+    async fn watch_events(&self, _wake: Arc<Notify>) {}
+
+    /// イベントの受信が接続中か。対応しないデータ源では `None`。
+    fn events_connected(&self) -> Option<bool> {
+        None
+    }
 }

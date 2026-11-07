@@ -14,7 +14,7 @@ const COLUMNS = [
   ["Lv", "num optional"], ["遭遇", "num optional"],
 ];
 
-const match = { revealTitle: false, loading: new Set(), selected: null, marks: new Map(), lanes: null, agents: new Map(), signature: "" };
+const match = { live: { match: null, ally: 0, enemy: 0, rounds: [] }, revealTitle: false, loading: new Set(), selected: null, marks: new Map(), lanes: null, agents: new Map(), signature: "" };
 
 const isEnemy = (player) => player.relation === "enemy";
 
@@ -50,7 +50,10 @@ function createAxis() {
   const record = element("p", "axis-record label");
   heading.append(title, record);
   const score = element("div", "axis-score");
-  head.append(heading, score);
+  const flow = element("div", "live-flow");
+  const scoreBlock = element("div");
+  scoreBlock.append(score, flow);
+  head.append(heading, scoreBlock);
 
   const grid = element("div", "axis-grid");
   grid.setAttribute("role", "img");
@@ -60,8 +63,68 @@ function createAxis() {
   const enemyLabel = element("span", "axis-label", "ENEMY");
   grid.append(allyLabel, ally, element("span"), createBands(), enemyLabel, enemy);
   axis.append(head, grid);
-  match.lanes = { axis: grid, root: axis, title, record, score, ally, enemy, allyLabel, enemyLabel };
+  match.lanes = { axis: grid, root: axis, title, record, score, flow, ally, enemy, allyLabel, enemyLabel };
   return axis;
+}
+
+const LOSS_BONUS = [1900, 2400, 2900];
+const HALF_ROUNDS = 12;
+
+/** スコアの増え方から、ラウンドの勝ち負けを順に記録する。 */
+function trackRounds(snapshot) {
+  const live = match.live;
+  if (live.match !== snapshot.match_id) {
+    Object.assign(live, { match: snapshot.match_id, ally: snapshot.score[0], enemy: snapshot.score[1], rounds: [] });
+    return;
+  }
+  const allyWins = snapshot.score[0] - live.ally;
+  const enemyWins = snapshot.score[1] - live.enemy;
+  if (allyWins === 1 && enemyWins === 0) live.rounds.push(true);
+  else if (enemyWins === 1 && allyWins === 0) live.rounds.push(false);
+  else if (allyWins !== 0 || enemyWins !== 0) live.rounds.length = 0;
+  live.ally = snapshot.score[0];
+  live.enemy = snapshot.score[1];
+}
+
+function trailingCount(rounds, value) {
+  let count = 0;
+  for (let index = rounds.length - 1; index >= 0 && rounds[index] === value; index -= 1) count += 1;
+  return count;
+}
+
+function lossBonus(losses) {
+  return LOSS_BONUS[Math.min(losses, LOSS_BONUS.length) - 1];
+}
+
+/** スコアだけから分かる流れを出す。経済は連敗数からの推定で、実際の所持金ではない。 */
+function updateLiveFlow(snapshot) {
+  trackRounds(snapshot);
+  const { flow } = match.lanes;
+  const { rounds } = match.live;
+  const played = snapshot.score[0] + snapshot.score[1];
+  const next = played + 1;
+  const parts = [];
+
+  if (played === 0 || played === HALF_ROUNDS) parts.push(element("span", "", `次 R${next} ピストル`));
+  else parts.push(element("span", "", `次 R${next}`));
+
+  if (rounds.length) {
+    const strip = element("span", "live-rounds");
+    strip.setAttribute("aria-label", `観測した直近のラウンド、${rounds.filter(Boolean).length}勝`);
+    strip.append(...rounds.slice(-10).map((won) => element("i", won ? "" : "is-loss")));
+    parts.push(strip);
+
+    const wins = trailingCount(rounds, true);
+    const losses = trailingCount(rounds, false);
+    if (wins >= 2) parts.push(element("span", "", `${wins}連勝`));
+    if (losses >= 2) parts.push(element("span", "", `${losses}連敗`));
+    // 前半と後半の間は経済がリセットされるので推定しない。
+    if (played !== HALF_ROUNDS) {
+      if (losses) parts.push(element("span", "", `味方の推定ボーナス ${lossBonus(losses)}`));
+      if (wins) parts.push(element("span", "", `相手の推定ボーナス ${lossBonus(wins)}`));
+    }
+  }
+  flow.replaceChildren(...parts);
 }
 
 function updateHero(snapshot) {
@@ -85,6 +148,7 @@ function updateHero(snapshot) {
   if (score.dataset.value === value) return;
   score.dataset.value = value;
   score.replaceChildren(String(snapshot.score[0]), element("span", "", " : "), String(snapshot.score[1]));
+  updateLiveFlow(snapshot);
 }
 
 function highlight(key, active) {

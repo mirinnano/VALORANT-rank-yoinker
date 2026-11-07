@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -153,6 +154,16 @@ fn notify_match(app: AppHandle, body: String) {
     }
 }
 
+/// 共有画像をダウンロードフォルダへ保存し、保存先を返す。
+#[tauri::command]
+fn save_share_image(app: AppHandle, png_base64: String) -> Result<String, String> {
+    let bytes = STANDARD.decode(png_base64).map_err(|error| error.to_string())?;
+    let folder = app.path().download_dir().map_err(|error| error.to_string())?;
+    let path = folder.join(format!("vry-match-{}.png", now_ms()));
+    std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    Ok(path.display().to_string())
+}
+
 /// 画面に収まる範囲で大きく開く。
 fn fit_window(window: &WebviewWindow) -> tauri::Result<()> {
     let Some(monitor) = window.current_monitor()? else { return Ok(()) };
@@ -232,6 +243,7 @@ fn main() {
             run_diagnostics,
             save_recording,
             notify_match,
+            save_share_image,
             review_notes,
             save_review_note,
             reviewed_matches,

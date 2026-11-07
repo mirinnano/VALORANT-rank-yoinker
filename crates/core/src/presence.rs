@@ -27,10 +27,12 @@ pub struct PrivatePresence {
     pub custom_game: bool,
     pub party_id: Option<String>,
     pub party_size: u32,
+    pub party_state: Option<String>,
     /// 進行中の試合のスコア。自分のチーム、相手の順。
     pub score: Option<(u32, u32)>,
 }
 
+const PRESENCE_URI: &str = "/chat/v4/presences";
 const NESTED: [&str; 3] = ["matchPresenceData", "partyPresenceData", "playerPresenceData"];
 
 fn lookup<'a>(root: &'a Value, key: &str) -> Option<&'a Value> {
@@ -78,9 +80,21 @@ impl Presence {
                 .filter(|id| !id.is_empty())
                 .map(str::to_owned),
             party_size: lookup(&value, "partySize").and_then(Value::as_u64).unwrap_or(0) as u32,
+            party_state: lookup_str(&value, "partyState").map(str::to_owned),
             score: match_score(&value),
         })
     }
+}
+
+/// Riot Client の WebSocket のメッセージから、自分のプレゼンスを取り出す。
+pub fn own_presence_event(message: &str, puuid: &str) -> Option<PrivatePresence> {
+    let value: Value = serde_json::from_str(message).ok()?;
+    let payload = value.as_array()?.get(2)?;
+    if payload.get("uri")?.as_str()? != PRESENCE_URI {
+        return None;
+    }
+    let presences: Vec<Presence> = serde_json::from_value(payload.get("data")?.get("presences")?.clone()).ok()?;
+    find_own(&presences, puuid)
 }
 
 /// 自分のプレゼンスを探す。
@@ -214,6 +228,28 @@ mod tests {
 
         broken.private = Some(String::new());
         assert!(broken.decode().is_none());
+    }
+
+    fn event(presence: &Presence) -> String {
+        let data = json!({"uri": "/chat/v4/presences", "data": {"presences": [{
+            "puuid": presence.puuid, "private": presence.private, "product": "valorant"
+        }]}});
+        json!([8, "OnJsonApiEvent_chat_v4_presences", data]).to_string()
+    }
+
+    #[test]
+    fn reads_own_state_from_a_websocket_message() {
+        let own = presence("me", json!({"sessionLoopState": "PREGAME", "partyState": "DEFAULT"}));
+        let found = own_presence_event(&event(&own), "me").unwrap();
+        assert_eq!(found.state, Some(GameState::Pregame));
+    }
+
+    #[test]
+    fn ignores_other_players_and_other_messages() {
+        let friend = presence("friend", json!({"sessionLoopState": "INGAME"}));
+        assert!(own_presence_event(&event(&friend), "me").is_none());
+        assert!(own_presence_event("[5, \"subscribe\"]", "me").is_none());
+        assert!(own_presence_event("not json", "me").is_none());
     }
 
     #[test]

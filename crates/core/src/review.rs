@@ -3,6 +3,7 @@
 //! 試合詳細には他のプレイヤーの名前が含まれる場合がある。ここでは名前を読まず、
 //! 自分以外はエージェント名だけで扱う。
 
+use crate::analytics;
 use crate::rank;
 use crate::source::GameCatalog;
 use serde::Serialize;
@@ -17,6 +18,7 @@ const LOW_DAMAGE: i64 = 50;
 const LOW_IMPACT_MIN: usize = 3;
 const MULTI_KILL: u32 = 3;
 const SCORE_MARGIN: f64 = 0.15;
+const MAX_HIGHLIGHTS: usize = 3;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ScoreLine {
@@ -50,6 +52,38 @@ pub struct RoundLine {
     pub loadout: i64,
     pub spent: i64,
     pub result: Option<String>,
+    /// 自分だけが残ったときの相手の人数。
+    pub clutch_against: Option<u32>,
+    /// このラウンドの自分の行動。時間順。
+    pub events: Vec<RoundEvent>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoundEventKind {
+    Kill,
+    Assist,
+    Death,
+    Plant,
+    Defuse,
+}
+
+/// 自分の行動。相手はエージェント名だけで表す。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RoundEvent {
+    pub at_ms: i64,
+    pub kind: RoundEventKind,
+    pub target: Option<String>,
+    pub weapon: Option<String>,
+}
+
+/// 試合の見どころ。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Highlight {
+    pub round: u32,
+    pub title: String,
+    pub detail: String,
+    pub score: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -83,6 +117,8 @@ pub struct MatchReview {
     pub lines: Vec<ScoreLine>,
     pub rounds: Vec<RoundLine>,
     pub findings: Vec<Finding>,
+    /// 見どころ。良い順。
+    pub highlights: Vec<Highlight>,
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -143,7 +179,89 @@ fn tally_players(rounds: &[Value]) -> HashMap<&str, Tally> {
     tallies
 }
 
-fn round_line(round: &Value, index: usize, own: &str, team: Option<&str>) -> RoundLine {
+fn weapon_name(kill: &Value, catalog: &GameCatalog) -> Option<String> {
+    let finishing = kill.get("finishingDamage")?;
+    match text(finishing, "damageType")? {
+        "Weapon" => catalog.weapons.get(&text(finishing, "damageItem")?.to_lowercase()).cloned(),
+        "Ability" => Some("アビリティ".to_owned()),
+        "Melee" => Some("ナイフ".to_owned()),
+        "Bomb" => Some("スパイク".to_owned()),
+        _ => None,
+    }
+}
+
+fn round_events(round: &Value, kills: &[&Value], own: &str, labels: &Labels, catalog: &GameCatalog) -> Vec<RoundEvent> {
+    let label = |subject: Option<&str>| subject.and_then(|s| labels.get(s)).cloned();
+    let mut events = Vec::new();
+    for kill in kills {
+        let at_ms = kill_time(kill).min(i64::from(i32::MAX));
+        let event = |kind, target| RoundEvent { at_ms, kind, target, weapon: weapon_name(kill, catalog) };
+        if text(kill, "killer") == Some(own) {
+            events.push(event(RoundEventKind::Kill, label(text(kill, "victim"))));
+        } else if text(kill, "victim") == Some(own) {
+            events.push(event(RoundEventKind::Death, label(text(kill, "killer"))));
+        } else if list(kill, "assistants").iter().any(|assistant| assistant.as_str() == Some(own)) {
+            let mut assist = event(RoundEventKind::Assist, label(text(kill, "victim")));
+            assist.weapon = None;
+            events.push(assist);
+        }
+    }
+    let action = |kind, key: &str, time: &str| {
+        (text(round, key) == Some(own)).then(|| RoundEvent { at_ms: int(round, time), kind, target: None, weapon: None })
+    };
+    events.extend(action(RoundEventKind::Plant, "bombPlanter", "plantRoundTime"));
+    events.extend(action(RoundEventKind::Defuse, "bombDefuser", "defuseRoundTime"));
+    events.sort_by_key(|event| event.at_ms);
+    events
+}
+
+type Labels = HashMap<String, String>;
+
+fn highlight(round: &RoundLine) -> Option<Highlight> {
+    let weapon = round
+        .events
+        .iter()
+        .filter(|event| event.kind == RoundEventKind::Kill)
+        .find_map(|event| event.weapon.clone());
+    let suffix = weapon.map(|name| format!("、{name}")).unwrap_or_default();
+    let place = format!("第{}ラウンド", round.number);
+    let scene = |score, title: String, detail: String| Some(Highlight { round: round.number, title, detail, score });
+
+    if round.won {
+        if let Some(opponents) = round.clutch_against {
+            let detail = format!("{place}、{} キル{suffix}", round.kills);
+            return scene(60 + opponents * 15 + round.kills * 5, format!("1v{opponents} Clutch"), detail);
+        }
+    }
+    let detail = format!("{place}{suffix}");
+    match round.kills {
+        5.. => scene(100, "Ace".to_owned(), detail),
+        4 => scene(70, "4K".to_owned(), detail),
+        3 => scene(if round.won { 45 } else { 35 }, "3K".to_owned(), detail),
+        2 if round.won && round.first_kill => scene(25, "Entry".to_owned(), detail),
+        _ if round.won && round.events.iter().any(|event| event.kind == RoundEventKind::Defuse) => {
+            scene(30, "Defuse".to_owned(), place)
+        }
+        _ => None,
+    }
+}
+
+fn highlights(rounds: &[RoundLine]) -> Vec<Highlight> {
+    let mut scenes: Vec<Highlight> = rounds.iter().filter_map(highlight).collect();
+    scenes.sort_by(|a, b| b.score.cmp(&a.score).then(a.round.cmp(&b.round)));
+    scenes.truncate(MAX_HIGHLIGHTS);
+    scenes
+}
+
+fn round_line(
+    round: &Value,
+    index: usize,
+    own: &str,
+    team: Option<&str>,
+    teams: &HashMap<&str, &str>,
+    labels: &Labels,
+    catalog: &GameCatalog,
+) -> RoundLine {
     let own_stats = list(round, "playerStats").iter().find(|p| text(p, "subject") == Some(own));
     let null = Value::Null;
     let stats = own_stats.unwrap_or(&null);
@@ -165,6 +283,8 @@ fn round_line(round: &Value, index: usize, own: &str, team: Option<&str>) -> Rou
         loadout: int(economy, "loadoutValue"),
         spent: int(economy, "spent"),
         result: text(round, "roundResult").map(str::to_owned),
+        clutch_against: analytics::clutch_opponents(own, team, teams, &analytics::round_kills(round)),
+        events: round_events(round, &analytics::round_kills(round), own, labels, catalog),
     }
 }
 
@@ -322,10 +442,19 @@ pub fn analyze(own: &str, details: &Value, catalog: &GameCatalog) -> Option<Matc
         .collect();
     lines.sort_by(|a, b| b.is_ally.cmp(&a.is_ally).then(b.acs.cmp(&a.acs)));
 
+    let teams: HashMap<&str, &str> =
+        players.iter().filter_map(|p| Some((text(p, "subject")?, text(p, "teamId")?))).collect();
+    let labels: Labels = players
+        .iter()
+        .filter_map(|p| {
+            let agent = catalog.agents.get(&text(p, "characterId")?.to_lowercase())?;
+            Some((text(p, "subject")?.to_owned(), agent.clone()))
+        })
+        .collect();
     let rounds: Vec<RoundLine> = raw_rounds
         .iter()
         .enumerate()
-        .map(|(index, round)| round_line(round, index, own, my_team))
+        .map(|(index, round)| round_line(round, index, own, my_team, &teams, &labels, catalog))
         .collect();
 
     let allies: Vec<&ScoreLine> = lines.iter().filter(|line| line.is_ally).collect();
@@ -348,6 +477,7 @@ pub fn analyze(own: &str, details: &Value, catalog: &GameCatalog) -> Option<Matc
         own_score: wins(true),
         enemy_score: wins(false),
         findings: findings(&rounds, &own_line, team_acs),
+        highlights: highlights(&rounds),
         own: own_line,
         team_acs,
         team_adr,
@@ -438,6 +568,49 @@ mod tests {
         let r = analyze("me", &details(Vec::new()), &catalog()).unwrap();
         assert_eq!(r.own_score, 0);
         assert!(r.rounds.is_empty());
+    }
+
+    fn line(number: u32, won: bool, kills: u32) -> RoundLine {
+        RoundLine {
+            number, won, kills, damage: 0, died: false, first_kill: false, first_death: false,
+            loadout: 0, spent: 0, result: None, clutch_against: None, events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn highlights_rank_clutches_and_aces_first() {
+        let mut clutch = line(2, true, 3);
+        clutch.clutch_against = Some(3);
+        let rounds = [line(1, true, 3), clutch, line(3, false, 5), line(4, true, 0)];
+        let scenes = highlights(&rounds);
+        assert_eq!(scenes[0].title, "1v3 Clutch");
+        assert_eq!(scenes[1].title, "Ace");
+        assert_eq!(scenes[2].title, "3K");
+    }
+
+    #[test]
+    fn a_lost_clutch_is_not_a_highlight() {
+        let mut lost = line(1, false, 1);
+        lost.clutch_against = Some(2);
+        assert!(highlights(&[lost]).is_empty());
+    }
+
+    #[test]
+    fn events_are_ordered_and_name_agents_only() {
+        let mut value = round(0, "Blue", ("me", "foe"), 100, 4000);
+        value["plantRoundTime"] = json!(5000);
+        value["bombPlanter"] = json!("me");
+        value["playerStats"][0]["kills"][0]["finishingDamage"] =
+            json!({"damageType": "Weapon", "damageItem": "VANDAL"});
+        let mut catalog = catalog();
+        catalog.weapons.insert("vandal".into(), "Vandal".into());
+        let r = analyze("me", &details(vec![value]), &catalog).unwrap();
+        let events = &r.rounds[0].events;
+        assert_eq!(events[0].kind, RoundEventKind::Kill);
+        assert_eq!(events[0].target.as_deref(), Some("Omen"));
+        assert_eq!(events[0].weapon.as_deref(), Some("Vandal"));
+        assert_eq!(events[1].kind, RoundEventKind::Plant);
+        assert!(!serde_json::to_string(&r).unwrap().contains("Realfoe"));
     }
 
     #[test]

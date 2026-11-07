@@ -38,6 +38,12 @@ fully, selecting allies count half, and locked agents are excluded. Role win-rat
 weights stay modest. Win rates shrink toward 50% with 20 prior matches, and pairs under 5 matches are ignored. The weights in
 `ui/pick.js` are initial values that have not been fitted to real data.
 
+## Live state
+
+State changes arrive over the Riot Client WebSocket, and a three second poll remains as a fallback. No documented endpoint
+exposes credits or kills during a match, so the match screen derives round flow, streaks and estimated loss bonus from score
+changes. Estimates are labelled and never presented as real credits.
+
 ## Metrics
 
 Everyone gets ACS, ADR, KAST, first kill and first death rates from their latest competitive match. Your own numbers are
@@ -47,6 +53,12 @@ teammate kills your killer within 5 seconds. Attack and defense come from the bo
 The stats screen adds DDΔ, Econ, first kill difference, clutches, trades, survival, form against older matches, results
 after a win or loss, and time of day. Benchmarks differ between sources, so numbers are compared with your own history
 instead of being graded. The metrics listed first change with the role you play most.
+
+## Review and sharing
+
+Each round lists your kills, assists, deaths, plants and defuses in time order, naming others by agent. Best scenes rank
+clutches, aces and multi-kills, and selecting one opens that round. The share image shows the result, your numbers, your
+agent and the best scene. Your name is off by default, and other players' names are never included.
 
 ## Match alert
 

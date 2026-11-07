@@ -76,13 +76,82 @@ function renderRoundDetail() {
   }
   const facts = element("dl");
   fact(facts, "結果", round.won ? "勝ち" : "負け");
-  fact(facts, "キル", round.kills);
   fact(facts, "与ダメージ", round.damage);
-  fact(facts, "生存", round.died ? "倒された" : "生き残った");
   fact(facts, "装備の価値", round.loadout);
   const opening = round.first_kill ? "先手を取った" : round.first_death ? "最初に倒された" : "－";
   fact(facts, "開幕", opening);
-  pane.replaceChildren(element("p", "note-title", `第${round.number}ラウンド`), facts, createNoteEditor(round.number));
+  if (round.clutch_against) fact(facts, "クラッチ", `1v${round.clutch_against}`);
+  pane.replaceChildren(
+    element("p", "note-title", `第${round.number}ラウンド`),
+    eventList(round),
+    facts,
+    createNoteEditor(round.number),
+  );
+}
+
+const EVENT_TEXT = {
+  kill: (event) => `${event.target ?? "相手"} を倒した`,
+  assist: (event) => `${event.target ?? "相手"} をアシスト`,
+  death: (event) => `${event.target ?? "相手"} に倒された`,
+  plant: () => "スパイクを設置",
+  defuse: () => "スパイクを解除",
+};
+
+function formatRoundTime(ms) {
+  const seconds = Math.floor(ms / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** ラウンドの中で自分がしたことを時間順に並べる。 */
+function eventList(round) {
+  const events = round.events ?? [];
+  if (events.length === 0) return element("p", "fit-note", "記録された行動はありません。");
+  const list = element("ol", "round-events");
+  for (const event of events) {
+    const item = element("li", `is-${event.kind}`);
+    item.append(
+      element("span", "event-time", formatRoundTime(event.at_ms)),
+      event.target ? agentIcon(event.target, 26) : element("span", "event-mark"),
+      element("span", "", EVENT_TEXT[event.kind](event)),
+      element("span", "event-weapon", event.weapon ?? ""),
+    );
+    list.append(item);
+  }
+  return list;
+}
+
+function focusRound(number) {
+  reviewState.round = number;
+  renderRounds();
+  renderRoundDetail();
+  document.getElementById("round-strip")?.scrollIntoView({ block: "nearest" });
+}
+
+/** 試合の見どころ。最良の場面を大きく、続きを小さく出す。 */
+function highlightSection(review) {
+  const scenes = review.highlights ?? [];
+  const section = element("section", "highlights");
+  const head = element("div", "highlight-head");
+  head.append(element("h2", "", "BEST SCENE / ベストシーン"));
+  const share = element("button", "primary", "共有画像を作る");
+  share.type = "button";
+  share.addEventListener("click", () => openShare(review));
+  head.append(share);
+  section.append(head);
+  if (scenes.length === 0) {
+    section.append(element("p", "fit-note", "この試合に目立つ場面はありませんでした。"));
+    return section;
+  }
+  const list = element("div", "highlight-list");
+  scenes.forEach((scene, index) => {
+    const button = element("button", index === 0 ? "scene is-best" : "scene");
+    button.type = "button";
+    button.append(element("span", "scene-title", scene.title), element("small", "", scene.detail));
+    button.addEventListener("click", () => focusRound(scene.round));
+    list.append(button);
+  });
+  section.append(list);
+  return section;
 }
 
 function selectRound(number) {
@@ -105,6 +174,7 @@ function renderRounds() {
     if (round.first_death) button.append(element("i", "is-first-death"));
     if (round.first_kill) button.append(element("i", "is-first-kill"));
     if (reviewState.notes.has(round.number)) button.append(element("em"));
+    if (round.kills >= 2) button.append(element("b", "round-kills", `${round.kills}K`));
     button.addEventListener("click", () => selectRound(round.number));
     return button;
   }));
@@ -212,8 +282,10 @@ function renderReview(pane, review) {
   side.append(element("h2", "whole-note", "NOTE / 試合全体のメモ"), createNoteEditor(null));
 
   const inner = element("div", "review-inner");
-  inner.append(timeline, side, scoreboard(review));
-  pane.replaceChildren(hero, inner);
+  inner.append(highlightSection(review), timeline, side, scoreboard(review));
+  const panel = element("div");
+  panel.id = "share-panel";
+  pane.replaceChildren(hero, panel, inner);
   // 最初に見直す場所が分かるよう、先頭の気づきのラウンドを示す。
   const first = review.findings.find((finding) => finding.tone === "focus" && finding.rounds.length);
   if (first) {

@@ -145,8 +145,18 @@ fn review_details(seed: usize) -> Value {
                     let kills: Vec<Value> = if i == first_killer {
                         // 自分が開幕で倒される場面を混ぜ、気づきの表示を確認できるようにする。
                         let victim = if i >= 5 && round % 2 == 0 { OWN } else { PLAYERS[(i + 5) % 10].puuid };
-                        vec![json!({"killer": d.puuid, "victim": victim,
+                        vec![json!({"killer": d.puuid, "victim": victim, "assistants": [],
+                                    "finishingDamage": {"damageType": "Weapon", "damageItem": "weapon-vandal"},
                                     "timeSinceRoundStartMillis": 18_000 + round * 300})]
+                    } else if i == 0 && round == 9 {
+                        // 自分のエースを 1 回入れ、見どころの表示を確認できるようにする。
+                        (5..10)
+                            .map(|enemy| json!({
+                                "killer": d.puuid, "victim": PLAYERS[enemy].puuid, "assistants": [],
+                                "finishingDamage": {"damageType": "Weapon", "damageItem": "weapon-vandal"},
+                                "timeSinceRoundStartMillis": 25_000 + enemy * 3_000
+                            }))
+                            .collect()
                     } else if (round + i + seed) % 4 == 0 {
                         let victim = PLAYERS[(i + 6) % 10].puuid;
                         vec![json!({"killer": d.puuid, "victim": victim, "assistants": [],
@@ -171,6 +181,7 @@ fn review_details(seed: usize) -> Value {
                 "winningTeam": if won_round(round) { "Blue" } else { "Red" },
                 "roundResult": "Eliminated",
                 "bombPlanter": PLAYERS[if round < 12 { 5 } else { 0 }].puuid,
+                "plantRoundTime": 42_000,
                 "playerStats": stats
             })
         })
@@ -259,6 +270,7 @@ pub fn scenario() -> Scenario {
             {"ID": "season-now", "Name": "ACT 3", "Type": "act", "StartTime": "t1", "IsActive": true}
         ]}),
         agents: AGENTS.iter().map(|(id, name)| ((*id).to_owned(), (*name).to_owned())).collect(),
+        weapons: HashMap::from([("weapon-vandal".to_owned(), "Vandal".to_owned())]),
         maps: HashMap::from([
             ("/game/maps/ascent/ascent".to_owned(), "Ascent".to_owned()),
             ("/game/maps/bonsai/bonsai".to_owned(), "Split".to_owned()),

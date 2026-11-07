@@ -446,6 +446,42 @@ dd { margin: 0; font-family: var(--mono); font-size: 14px; text-align: right; }
 .scoreboard tr.team-start td { border-top: 2px solid var(--red); }
 .whole-note { margin-top: 20px !important; }
 
+/* ベストシーンとラウンドの行動 */
+.highlights { grid-column: 1 / -1; }
+.highlight-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.highlight-head h2 { margin: 0; }
+.highlight-list { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 6px; }
+.scene { display: grid; align-content: end; min-height: 84px; padding: 10px 14px; border: 0; background: var(--ink-2); color: var(--paper); text-align: left; cursor: pointer; transition: transform var(--motion-fast) var(--ease-out); }
+.scene:active { transform: scale(0.97); }
+.scene.is-best { background: var(--paper); color: var(--ink); }
+.scene-title { font-family: var(--display); font-size: 26px; font-style: italic; font-weight: 900; letter-spacing: -0.02em; line-height: 1; text-transform: uppercase; }
+.scene.is-best .scene-title { font-size: 44px; }
+.scene small { margin-top: 6px; color: var(--mute); font-family: var(--mono); font-size: 12px; }
+.scene.is-best small { color: var(--ink); }
+.round-kills { position: absolute; top: 2px; left: 3px; font-size: 9px; font-weight: 600; }
+.round-events { margin: 0 0 10px; padding: 0; list-style: none; }
+.round-events li { display: grid; grid-template-columns: 44px 26px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 36px; border-top: 1px solid var(--line); font-size: 14px; }
+.event-time, .event-weapon { color: var(--mute); font-family: var(--mono); font-size: 12px; }
+.event-mark { width: 10px; height: 10px; margin: 0 auto; background: var(--yellow); }
+.round-events .is-kill { font-weight: 800; }
+.round-events .is-death { color: var(--red); }
+.round-events .is-assist { color: var(--mute); }
+
+/* 共有画像 */
+#share-panel:empty { display: none; }
+#share-panel { padding: 16px 24px; border-bottom: 1px solid var(--line); background: var(--ink-2); }
+.share-canvas { display: block; width: 100%; max-width: 760px; height: auto; }
+.share-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; color: var(--mute); font-size: 13px; overflow-wrap: anywhere; }
+.share-actions label { display: inline-flex; align-items: center; gap: 6px; }
+.share-actions input { accent-color: var(--red); }
+
+/* 試合中の流れ */
+.live-flow { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 16px; min-height: 18px; margin-top: 6px; font-family: var(--mono); font-size: 12px; }
+.live-flow span { padding: 1px 5px; background: var(--ink); }
+.live-rounds { display: inline-flex; gap: 2px; padding: 3px 4px !important; }
+.live-rounds i { width: 8px; height: 8px; background: var(--paper); }
+.live-rounds i.is-loss { background: var(--red); }
+
 /* ピック */
 .pick-clock.is-late { color: var(--red); }
 .pick-layout { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 20px; padding: 16px 24px 24px; }
@@ -558,6 +594,7 @@ dd { margin: 0; font-family: var(--mono); font-size: 14px; text-align: right; }
   #match-view:not([hidden]) { grid-template-columns: minmax(0, 1fr); }
   .detail { display: none; }
   .home, .review-inner, .stats-grid, .pick-layout { grid-template-columns: minmax(0, 1fr); }
+  .highlight-list { grid-template-columns: 1fr; }
   .pick-team { position: static; height: 380px; }
   .hero-disc { right: 24px; width: 140px; height: 140px; }
   .hero-disc .rank-icon { width: 104px; height: 104px; }

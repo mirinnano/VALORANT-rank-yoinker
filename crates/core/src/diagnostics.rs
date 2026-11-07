@@ -63,7 +63,9 @@ const MATCH_FIELDS: [Field; 15] = [
     ("roundResults.*.playerStats.*.damage.*.damage", Unconfirmed),
     ("roundResults.*.playerStats.*.economy.loadoutValue", Unconfirmed),
 ];
-const ANALYTICS_FIELDS: [Field; 5] = [
+const ANALYTICS_FIELDS: [Field; 7] = [
+    ("roundResults.*.playerStats.*.kills.*.finishingDamage.damageItem", Unconfirmed),
+    ("roundResults.*.plantRoundTime", Unconfirmed),
     ("roundResults.*.playerStats.*.damage.*.receiver", Unconfirmed),
     ("roundResults.*.playerStats.*.economy.spent", Unconfirmed),
     ("roundResults.*.playerStats.*.kills.*.assistants", Unconfirmed),
@@ -346,6 +348,12 @@ pub async fn run(source: &dyn RiotSource) -> Report {
         checks.push(skipped("試合中のデータ", "試合中に実行すると確認できます"));
     }
 
+    match source.events_connected() {
+        Some(true) => checks.push(check("WebSocket", CheckStatus::Pass, "状態の変化を受信しています")),
+        Some(false) => checks.push(check("WebSocket", CheckStatus::Warn, "未接続です。定期確認で動作します")),
+        None => {}
+    }
+
     Report { checks }
 }
 
@@ -417,6 +425,7 @@ async fn capture(source: &dyn RiotSource) -> Result<Scenario> {
         content: serde_json::json!({ "Seasons": seasons }),
         agents: catalog.agents,
         maps: catalog.maps,
+        weapons: catalog.weapons,
     })
 }
 

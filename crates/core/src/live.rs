@@ -5,19 +5,25 @@
 
 use crate::error::{Error, Result};
 use crate::local::{parse_client_log, read_lossy, LocalPaths, Lockfile};
-use crate::presence::Presence;
+use crate::presence::{self, Presence};
 use crate::retry::{with_policy, Reply};
 use crate::source::{GameCatalog, RiotSource};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::{header, redirect, Client, Method, RequestBuilder};
+use futures_util::{SinkExt, StreamExt};
+use native_tls::TlsConnector;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, OnceCell, RwLock, Semaphore};
+use tokio::sync::{Mutex, Notify, OnceCell, RwLock, Semaphore};
 use tokio::time::Instant;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async_tls_with_config, Connector};
 
 const CLIENT_PLATFORM: &str = "ew0KCSJwbGF0Zm9ybVR5cGUiOiAiUEMiLA0KCSJwbGF0Zm9ybU9TIjog\
 IldpbmRvd3MiLA0KCSJwbGF0Zm9ybU9TVmVyc2lvbiI6ICIxMC4wLjE5MDQyLjEuMjU2LjY0Yml0IiwNCgkicGxhdGZvcm1DaGlwc2V0IjogIlVua25vd24iDQp9";
@@ -27,6 +33,19 @@ const VALORANT_API: &str = "https://valorant-api.com/v1";
 const MAX_CONCURRENT: usize = 4;
 const MIN_INTERVAL: Duration = Duration::from_millis(150);
 const RATE_LIMIT_HOLD: Duration = Duration::from_secs(5);
+const EVENT_RECONNECT: Duration = Duration::from_secs(5);
+const PRESENCE_SUBSCRIPTION: &str = r#"[5, "OnJsonApiEvent_chat_v4_presences"]"#;
+
+/// WebSocket のエラー。URL を含まないよう文字列にしない。
+#[derive(Debug, thiserror::Error)]
+enum EventError {
+    #[error("WebSocket の接続に失敗: {0}")]
+    Socket(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("TLS の設定に失敗: {0}")]
+    Tls(#[from] native_tls::Error),
+    #[error("認証ヘッダーの作成に失敗")]
+    Header,
+}
 
 #[derive(Clone)]
 struct Session {
@@ -56,6 +75,7 @@ pub struct LiveSource {
     permits: Semaphore,
     next_slot: Mutex<Instant>,
     catalog: OnceCell<GameCatalog>,
+    events_connected: AtomicBool,
 }
 
 impl LiveSource {
@@ -75,6 +95,7 @@ impl LiveSource {
             permits: Semaphore::new(MAX_CONCURRENT),
             next_slot: Mutex::new(Instant::now()),
             catalog: OnceCell::new(),
+            events_connected: AtomicBool::new(false),
         })
     }
 
@@ -130,6 +151,34 @@ impl LiveSource {
             slot
         };
         tokio::time::sleep_until(wait_until).await;
+    }
+
+    /// Riot Client の WebSocket へ接続し、自分の状態が変わるたびに起こす。
+    async fn read_events(&self, session: &Session, wake: &Notify) -> std::result::Result<(), EventError> {
+        let auth = STANDARD.encode(format!("riot:{}", session.lockfile.password));
+        let mut request = format!("wss://127.0.0.1:{}", session.lockfile.port).into_client_request()?;
+        let value = format!("Basic {auth}").parse().map_err(|_| EventError::Header)?;
+        request.headers_mut().insert(header::AUTHORIZATION, value);
+
+        // 自己署名証明書を受け入れるのは、この 127.0.0.1 への接続だけ。
+        let tls = TlsConnector::builder().danger_accept_invalid_certs(true).build()?;
+        let (mut socket, _) =
+            connect_async_tls_with_config(request, None, false, Some(Connector::NativeTls(tls))).await?;
+        socket.send(Message::text(PRESENCE_SUBSCRIPTION)).await?;
+
+        self.events_connected.store(true, Ordering::Relaxed);
+        tracing::info!("WebSocket に接続");
+        let mut last = None;
+        while let Some(message) = socket.next().await {
+            let Message::Text(text) = message? else { continue };
+            let Some(own) = presence::own_presence_event(text.as_str(), &session.puuid) else { continue };
+            let current = (own.state, own.party_state);
+            if last.as_ref() != Some(&current) {
+                last = Some(current);
+                wake.notify_one();
+            }
+        }
+        Ok(())
     }
 
     /// レート制限を受けたら、全体の送信を止める。
@@ -321,15 +370,34 @@ impl RiotSource for LiveSource {
         .ok_or_else(|| Error::Decode("content-service".into()))
     }
 
+    async fn watch_events(&self, wake: Arc<Notify>) {
+        loop {
+            // 再接続のたびにセッションを読み直す。Riot Client が再起動すると接続先が変わる。
+            if let Ok(session) = self.establish().await {
+                if let Err(error) = self.read_events(&session, &wake).await {
+                    tracing::warn!(error = %error, "WebSocket が切断");
+                }
+                self.events_connected.store(false, Ordering::Relaxed);
+            }
+            tokio::time::sleep(EVENT_RECONNECT).await;
+        }
+    }
+
+    fn events_connected(&self) -> Option<bool> {
+        Some(self.events_connected.load(Ordering::Relaxed))
+    }
+
     async fn catalog(&self) -> Result<GameCatalog> {
         // 起動中に変わらないので、一度だけ取得する。
         self.catalog
             .get_or_try_init(|| async {
                 let agents = self.public_data("/agents?isPlayableCharacter=true").await?;
                 let maps = self.public_data("/maps").await?;
+                let weapons = self.public_data("/weapons").await?;
                 Ok(GameCatalog {
                     agents: lookup_table(&agents, "uuid"),
                     maps: lookup_table(&maps, "mapUrl"),
+                    weapons: lookup_table(&weapons, "uuid"),
                 })
             })
             .await

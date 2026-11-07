@@ -107,7 +107,8 @@ const WEIGHT = {
   ownMap: 1.2,
   ownOverall: 0.8,
   synergy: 0.5,
-  selectedByAlly: -0.25,
+  // 選択中の味方と重ならないよう、ほかの要素より大きく下げる。
+  selectedByAlly: -1,
 };
 /** 少ない試合で振れないよう、勝率へ足す仮の試合数。 */
 const PRIOR = { observed: 20, own: 4, pair: 20 };
