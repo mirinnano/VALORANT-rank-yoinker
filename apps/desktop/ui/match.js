@@ -9,7 +9,8 @@ const MARK_STAGGER_MS = 35;
 
 const COLUMNS = [
   ["組", "party"], ["エージェント", "agent"], ["プレイヤー", ""], ["ランク", ""], ["RR", "num"],
-  ["最高", "optional"], ["勝率", "num"], ["K/D", "num"], ["HS%", "num"], ["直近5戦", ""],
+  ["最高", "optional"], ["勝率", "num"], ["K/D", "num"], ["ACS", "num"], ["ADR", "num"],
+  ["KAST", "num"], ["HS%", "num"], ["直近5戦", ""],
   ["Lv", "num optional"], ["遭遇", "num optional"],
 ];
 
@@ -75,7 +76,8 @@ function updateHero(snapshot) {
       wipeIn(title);
     }
   }
-  if (!snapshot.score || snapshot.state !== "in_game") {
+  if (snapshot.state === "pregame") return;
+  if (!snapshot.score) {
     score.replaceChildren();
     return;
   }
@@ -223,6 +225,9 @@ function playerRow(player) {
     element("td", "optional", player.peak.name),
     valueCell(player.win_rate === null ? null : `${player.win_rate}% (${player.games})`),
     valueCell(player.kd === null ? null : player.kd.toFixed(2)),
+    valueCell(player.acs),
+    valueCell(player.adr),
+    valueCell(player.kast === null ? null : `${player.kast}%`),
     valueCell(player.headshot_percent),
     form,
     valueCell(player.level, "num optional"),
@@ -284,6 +289,13 @@ function renderDetail(pane, player) {
   const recent = element("dl");
   fact(recent, "K/D", player.kd === null ? null : player.kd.toFixed(2));
   fact(recent, "ヘッドショット", player.headshot_percent === null ? null : `${player.headshot_percent}%`);
+  fact(recent, "ACS", player.acs);
+  fact(recent, "ADR", player.adr);
+  fact(recent, "KAST", player.kast === null ? null : `${player.kast}%`);
+  fact(recent, "DDΔ", player.damage_delta === null ? null : formatSigned(player.damage_delta));
+  fact(recent, "Econ", player.econ);
+  fact(recent, "先手率", player.first_kill_percent === null ? null : `${player.first_kill_percent}%`);
+  fact(recent, "被先手率", player.first_death_percent === null ? null : `${player.first_death_percent}%`);
   fact(recent, "獲得 RR", player.earned_rr === null ? null : formatSigned(player.earned_rr));
   fact(recent, "最後のプレイ", relativeTime(player.last_active_ms));
   if (player.recent_rr.length) {
@@ -308,6 +320,7 @@ function renderDetail(pane, player) {
     recent,
     element("h3", "", "あなたとの関係"),
   ];
+  if (player.relation === "own") nodes.push(...ownSummaryNodes(match.map));
   const relation = element("dl");
   fact(relation, "遭遇", player.encounters > 0 ? `過去 ${player.encounters} 回` : "はじめて");
   fact(relation, "レベル", player.level ?? "非公開");
@@ -317,6 +330,34 @@ function renderDetail(pane, player) {
   }
   body.append(...nodes);
   pane.replaceChildren(hero, body);
+}
+
+/** 自分だけに出す、保存済みの試合の集計。 */
+function ownSummaryNodes(map) {
+  const summary = app.profile?.summary;
+  if (!summary) return [];
+  const all = element("dl");
+  fact(all, "勝率", percentOf(summary.wins, summary.games));
+  fact(all, "ACS / ADR", `${summary.acs ?? "－"} / ${summary.adr ?? "－"}`);
+  fact(all, "KAST", summary.kast === null ? null : `${summary.kast}%`);
+  fact(all, "K/D", summary.kd === null ? null : summary.kd.toFixed(2));
+  fact(all, "DDΔ / Econ", `${summary.damage_delta === null ? "－" : formatSigned(summary.damage_delta)} / ${summary.econ ?? "－"}`);
+  fact(all, "先手 / 被先手", `${summary.first_kill_percent ?? "－"}% / ${summary.first_death_percent ?? "－"}%`);
+  fact(all, "クラッチ", summary.clutch.played ? `${summary.clutch.won}/${summary.clutch.played}` : null);
+  fact(all, "トレードされた死", summary.trade_percent === null ? null : `${summary.trade_percent}%`);
+  fact(all, "ピストル", roundPercent(summary.pistol));
+  fact(all, "攻撃 / 防衛", `${roundPercent(summary.attack) ?? "－"} / ${roundPercent(summary.defense) ?? "－"}`);
+  fact(all, "エコ / フルバイ", `${roundPercent(summary.eco) ?? "－"} / ${roundPercent(summary.full_buy) ?? "－"}`);
+  const nodes = [element("h3", "", `直近${summary.games}試合の自分`), all];
+
+  const onMap = summary.maps.find((entry) => entry.name === map);
+  if (onMap) {
+    const mapFacts = element("dl");
+    fact(mapFacts, "勝率", `${onMap.wins}勝${onMap.games - onMap.wins}敗`);
+    fact(mapFacts, "ACS / K/D", `${onMap.acs ?? "－"} / ${onMap.kd?.toFixed(2) ?? "－"}`);
+    nodes.push(element("h3", "", `${map} の自分`), mapFacts);
+  }
+  return nodes;
 }
 
 function selectPlayer(key, focus = false) {
@@ -339,7 +380,7 @@ function moveSelection(offset) {
 }
 
 function ensureMatchLayout(view) {
-  if (view.querySelector(".axis")) return;
+  if (view.querySelector(".table-pane")) return;
   match.marks.clear();
   match.heroMap = undefined;
   match.revealTitle = true;
@@ -377,26 +418,8 @@ function renderTable(view, snapshot) {
   selectPlayer(known ? match.selected : own?.key ?? snapshot.players[0].key, focused);
 }
 
-function renderMatch(view, snapshot) {
-  if (snapshot.players.length === 0) {
-    match.signature = "";
-    match.agents.clear();
-    match.selected = null;
-    view.classList.add("is-empty");
-    view.replaceChildren(noticeBox("試合はまだ始まっていません", "エージェント選択が始まると、この画面に切り替わります。"));
-    return;
-  }
-
-  // 同じ内容なら描き直さない。選択やスクロールを保つ。
-  if (view.querySelector(".axis")) updateHero(snapshot);
-  const signature = JSON.stringify(snapshot.players) + snapshot.state;
-  if (signature === match.signature) return;
-  match.signature = signature;
-  match.players = snapshot.players;
-
-  view.classList.remove("is-empty");
-  ensureMatchLayout(view);
-
+/** ランク軸を更新する。対戦画面とピック画面で共有する。 */
+function updateRankAxis(snapshot) {
   const allies = snapshot.players.filter((player) => !isEnemy(player));
   const enemies = snapshot.players.filter(isEnemy);
   updateMarks(snapshot.players);
@@ -412,6 +435,41 @@ function renderMatch(view, snapshot) {
     snapshot.enemy_average && `相手の平均は ${snapshot.enemy_average.name}`,
   ].filter(Boolean).join("、");
   match.lanes.axis.setAttribute("aria-label", summary || "ランクの分布");
+}
+
+function renderMatch(view, snapshot) {
+  if (snapshot.state !== "pregame") resetPick();
+  if (snapshot.state === "pregame" && snapshot.players.length > 0) {
+    match.signature = "";
+    match.players = snapshot.players;
+    view.classList.add("is-empty");
+    renderPick(view, snapshot);
+    return;
+  }
+
+  if (snapshot.players.length === 0) {
+    match.signature = "";
+    match.agents.clear();
+    match.selected = null;
+    view.classList.add("is-empty");
+    view.replaceChildren(noticeBox("試合はまだ始まっていません", "エージェント選択が始まると、この画面に切り替わります。"));
+    return;
+  }
+
+  // 同じ内容なら描き直さない。選択やスクロールを保つ。
+  if (view.querySelector(".table-pane")) updateHero(snapshot);
+  const signature = JSON.stringify(snapshot.players) + snapshot.state;
+  if (signature === match.signature) return;
+  match.signature = signature;
+  match.players = snapshot.players;
+  match.map = snapshot.map;
+
+  view.classList.remove("is-empty");
+  ensureMatchLayout(view);
+
+  updateRankAxis(snapshot);
+
+  match.summary = snapshot.profile?.summary ?? app.profile?.summary ?? null;
 
   updateHero(snapshot);
   renderTable(view, snapshot);

@@ -36,6 +36,7 @@ pub struct RawMatch {
     pub state: GameState,
     pub match_id: Option<String>,
     pub map_id: Option<String>,
+    pub phase_remaining_ms: Option<u64>,
     pub players: Vec<RawPlayer>,
 }
 
@@ -59,6 +60,7 @@ pub fn parse_pregame(value: &Value) -> Result<RawMatch> {
         state: GameState::Pregame,
         match_id: text(value, "ID"),
         map_id: text(value, "MapID"),
+        phase_remaining_ms: value.get("PhaseTimeRemainingNS").and_then(Value::as_u64).map(|ns| ns / 1_000_000),
         players: list,
     })
 }
@@ -73,6 +75,7 @@ pub fn parse_coregame(value: &Value) -> Result<RawMatch> {
         state: GameState::InGame,
         match_id: text(value, "MatchID"),
         map_id: text(value, "MapID"),
+        phase_remaining_ms: None,
         players: list,
     })
 }
@@ -168,6 +171,13 @@ fn player_view(player: &RawPlayer, my_team: Option<&str>, ctx: &BuildContext) ->
         afk_penalty: extra.stats.afk_penalty,
         last_active_ms: extra.stats.last_active_ms,
         recent_rr: extra.stats.form.clone(),
+        acs: extra.stats.acs,
+        adr: extra.stats.adr,
+        kast: extra.stats.kast,
+        first_kill_percent: extra.stats.first_kill_percent,
+        first_death_percent: extra.stats.first_death_percent,
+        damage_delta: extra.stats.damage_delta,
+        econ: extra.stats.econ,
         loading: !ctx.extras.contains_key(&player.subject),
         encounters: ctx.encounters.get(&player.subject).copied().unwrap_or(0),
     }
@@ -207,6 +217,8 @@ pub fn build_snapshot(raw: &RawMatch, ctx: &BuildContext) -> MatchSnapshot {
         enemy_average: average_rank(players.iter().filter(is_enemy)),
         profile: None,
         score: None,
+        phase_remaining_ms: raw.phase_remaining_ms,
+        pick_board: None,
         finished_match: None,
         state: raw.state,
         match_id: raw.match_id.clone(),
@@ -276,7 +288,7 @@ mod tests {
     }
 
     fn snapshot(players: Vec<RawPlayer>, fx: &Fixture) -> MatchSnapshot {
-        let raw = RawMatch { state: GameState::InGame, match_id: None, map_id: None, players };
+        let raw = RawMatch { state: GameState::InGame, match_id: None, map_id: None, phase_remaining_ms: None, players };
         build_snapshot(&raw, &fx.ctx())
     }
 

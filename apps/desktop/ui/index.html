@@ -9,9 +9,9 @@
   <link rel="stylesheet" href="main.css">
 </head>
 <body>
-  <header>
-    <div class="brand">vRY<i></i></div>
-    <div class="heading">
+  <header data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region>vRY<i></i></div>
+    <div class="heading" data-tauri-drag-region>
       <h1 id="title">VALORANT を待っています</h1>
       <p id="subtitle" role="status"></p>
     </div>
@@ -19,13 +19,26 @@
       <button type="button" data-view="home" aria-pressed="true">ホーム</button>
       <button type="button" data-view="match" aria-pressed="false">対戦</button>
       <button type="button" data-view="review" aria-pressed="false">振り返り</button>
+      <button type="button" data-view="stats" aria-pressed="false">統計</button>
       <button type="button" data-view="history" aria-pressed="false">遭遇履歴</button>
       <button type="button" data-view="settings" aria-pressed="false">設定</button>
     </nav>
+    <div class="window-controls">
+      <button id="window-minimize" type="button" aria-label="最小化">
+        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10"/></svg>
+      </button>
+      <button id="window-maximize" type="button" aria-label="最大化">
+        <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9"/></svg>
+      </button>
+      <button id="window-close" class="is-close" type="button" aria-label="閉じる">
+        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8"/></svg>
+      </button>
+    </div>
   </header>
   <main id="home-view"></main>
   <main id="match-view" hidden></main>
   <main id="review-view" hidden></main>
+  <main id="stats-view" hidden></main>
   <main id="history-view" hidden></main>
   <main id="settings-view" hidden>
     <section class="settings" aria-labelledby="notify-title">
@@ -55,10 +68,13 @@
   <script src="shared.js"></script>
   <script src="home.js"></script>
   <script src="match.js"></script>
+  <script src="pick.js"></script>
   <script src="review.js"></script>
+  <script src="stats.js"></script>
   <script src="history.js"></script>
   <script src="diagnostics.js"></script>
   <script src="alert.js"></script>
+  <script src="window.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

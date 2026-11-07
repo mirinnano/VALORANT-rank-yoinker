@@ -14,8 +14,39 @@ The app draws nothing over the game. Everything lives in the main window, which 
 | Home | Rank, last 24 hours, RR trend, recent matches, repeated issues | Menus |
 | Match | Rank axis, player table, player detail | Agent select starts |
 | Review | Result, findings, round strip, notes, scoreboard | A match ends |
+| Stats | Your aggregated metrics, by round type, map and agent | Manual |
 | Encounters | Searchable list of past players | Manual |
 | Diagnostics | Connection and field checks, anonymized recording | Manual |
+
+## Window
+
+The window has no system title bar. The header is the drag region, double-clicking it toggles maximize, and it carries
+minimize, maximize and close buttons.
+
+## Agent select
+
+Agent select has its own screen: five large portraits, the phase clock, team composition, rank spread and map fit.
+No public API offers global pick rates, so the app observes every player in your match details and your allies' latest
+matches, then stores map, agent, result and tier only. Rates come from your rank band and fall back to all ranks below five
+matches. The sample count is always shown.
+
+Agent select reuses the rank axis from the match screen, so ally spread reads the same way in both phases.
+
+Recommendations favour agents you can actually play. Two slots come from your recent pool and the last may come from outside
+it, marked as a stretch pick. Scores combine the missing role, the map, your own record and ally synergy. Locked allies count
+fully, selecting allies count half, and locked agents are excluded. Role win-rate gaps are small in published data, so role
+weights stay modest. Win rates shrink toward 50% with 20 prior matches, and pairs under 5 matches are ignored. The weights in
+`ui/pick.js` are initial values that have not been fitted to real data.
+
+## Metrics
+
+Everyone gets ACS, ADR, KAST, first kill and first death rates from their latest competitive match. Your own numbers are
+aggregated over the last 20 matches, stored one match per refresh to stay under rate limits. KAST counts a trade when a
+teammate kills your killer within 5 seconds. Attack and defense come from the bomb planter, so unplanted matches are left out.
+
+The stats screen adds DDΔ, Econ, first kill difference, clutches, trades, survival, form against older matches, results
+after a win or loss, and time of day. Benchmarks differ between sources, so numbers are compared with your own history
+instead of being graded. The metrics listed first change with the role you play most.
 
 ## Match alert
 

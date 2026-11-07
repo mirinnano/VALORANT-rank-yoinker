@@ -1,5 +1,7 @@
 //! 直近のコンペティティブ試合から成績を求める。
 
+use crate::analytics::{self, MatchMetrics};
+use crate::source::GameCatalog;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -11,6 +13,13 @@ pub struct RecentStats {
     pub last_active_ms: Option<i64>,
     /// 直近の試合の RR 増減。新しい順。
     pub form: Vec<i32>,
+    pub acs: Option<u32>,
+    pub adr: Option<u32>,
+    pub kast: Option<u32>,
+    pub first_kill_percent: Option<u32>,
+    pub first_death_percent: Option<u32>,
+    pub damage_delta: Option<i32>,
+    pub econ: Option<u32>,
 }
 
 /// `competitiveupdates` の応答から直近の試合を取り出す。
@@ -44,6 +53,7 @@ fn int(value: &Value, key: &str) -> Option<i64> {
 pub fn from_match(puuid: &str, summary: &Value, details: Option<&Value>) -> RecentStats {
     let null = Value::Null;
     let details = details.unwrap_or(&null);
+    let metrics = analytics::player_metrics(puuid, "", details, &GameCatalog::default());
 
     let (mut hits, mut headshots) = (0, 0);
     let rounds = list(details, "roundResults");
@@ -78,6 +88,13 @@ pub fn from_match(puuid: &str, summary: &Value, details: Option<&Value>) -> Rece
         afk_penalty: int(summary, "AFKPenalty").map(|n| n as i32),
         last_active_ms: started.map(|start| start + length),
         form: Vec::new(),
+        acs: metrics.as_ref().and_then(MatchMetrics::acs),
+        adr: metrics.as_ref().and_then(MatchMetrics::adr),
+        kast: metrics.as_ref().and_then(MatchMetrics::kast),
+        first_kill_percent: metrics.as_ref().and_then(MatchMetrics::first_kill_percent),
+        first_death_percent: metrics.as_ref().and_then(MatchMetrics::first_death_percent),
+        damage_delta: metrics.as_ref().and_then(MatchMetrics::damage_delta),
+        econ: metrics.as_ref().and_then(MatchMetrics::econ),
     }
 }
 

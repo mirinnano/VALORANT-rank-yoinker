@@ -4,6 +4,7 @@
 //! [`model::MatchSnapshot`] に変換する。UI が受け取るのはスナップショットだけで、
 //! Streamer Mode のプレイヤーの本名は取得自体を行わない。
 
+pub mod analytics;
 pub mod anonymize;
 pub mod content;
 pub mod demo;

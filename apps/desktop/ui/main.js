@@ -5,6 +5,7 @@ const views = {
   home: document.getElementById("home-view"),
   match: document.getElementById("match-view"),
   review: document.getElementById("review-view"),
+  stats: document.getElementById("stats-view"),
   settings: document.getElementById("settings-view"),
   history: document.getElementById("history-view"),
 };
@@ -87,6 +88,7 @@ function renderSnapshot(snapshot) {
   if (signature !== app.profileSignature) {
     app.profileSignature = signature;
     renderHome(views.home, app.profile);
+    renderStats(views.stats, app.profile?.summary);
   }
   if (!app.profile) renderHome(views.home, null);
   renderMatch(views.match, snapshot);

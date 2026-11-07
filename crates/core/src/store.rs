@@ -2,6 +2,8 @@
 
 use crate::error::Result;
 use crate::model::{MatchSnapshot, PlayerView, Relation};
+use crate::analytics::{MatchMetrics, ObservedPick};
+use crate::model::PickPair;
 use crate::review::MatchReview;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -18,6 +20,13 @@ pub struct Encounter {
     pub rank: String,
     pub seen_at_ms: i64,
     pub times_met: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickCount {
+    pub agent: String,
+    pub picks: u32,
+    pub wins: u32,
 }
 
 /// 自己レビューの記録。`round` が `None` なら試合全体へのメモ。
@@ -60,6 +69,20 @@ CREATE TABLE IF NOT EXISTS match_reviews (
     match_id TEXT PRIMARY KEY,
     review TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS match_metrics_v2 (
+    match_id TEXT PRIMARY KEY,
+    metrics TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS observed_picks (
+    match_id TEXT NOT NULL,
+    map TEXT NOT NULL,
+    team TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    won INTEGER NOT NULL,
+    tier INTEGER NOT NULL,
+    PRIMARY KEY (match_id, team, agent)
+);
+CREATE INDEX IF NOT EXISTS observed_picks_map ON observed_picks (map, tier);
 CREATE TABLE IF NOT EXISTS review_notes (
     match_id TEXT NOT NULL,
     round INTEGER NOT NULL,
@@ -151,6 +174,101 @@ impl Store {
             params![match_id, serde_json::to_string(review)?],
         )?;
         Ok(())
+    }
+
+    /// 指標を保存済みかを調べる。
+    pub fn has_metrics(&self, match_id: &str) -> Result<bool> {
+        let found = self
+            .db
+            .query_row("SELECT 1 FROM match_metrics_v2 WHERE match_id = ?1", [match_id], |_| Ok(()))
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    pub fn save_metrics(&self, metrics: &MatchMetrics) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO match_metrics_v2 (match_id, metrics) VALUES (?1, ?2)",
+            params![metrics.match_id, serde_json::to_string(metrics)?],
+        )?;
+        Ok(())
+    }
+
+    /// 指定した試合の指標を返す。保存していない試合は飛ばす。
+    pub fn metrics_for(&self, match_ids: &[String]) -> Result<Vec<MatchMetrics>> {
+        let mut query = self.db.prepare_cached("SELECT metrics FROM match_metrics_v2 WHERE match_id = ?1")?;
+        let mut found = Vec::new();
+        for id in match_ids {
+            let text: Option<String> = query.query_row([id], |row| row.get(0)).optional()?;
+            if let Some(text) = text {
+                found.push(serde_json::from_str(&text)?);
+            }
+        }
+        Ok(found)
+    }
+
+    /// 観測したピックを保存する。同じ試合を重ねて保存しても増えない。
+    pub fn save_picks(&mut self, match_id: &str, map: &str, picks: &[ObservedPick]) -> Result<()> {
+        let tx = self.db.transaction()?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR IGNORE INTO observed_picks (match_id, map, team, agent, won, tier)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for pick in picks {
+                insert.execute(params![match_id, map, pick.team, pick.agent, pick.won, pick.tier])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// マップとランク帯のピックを集計し、観測した試合数と一緒に返す。
+    pub fn pick_counts(&self, map: &str, low: u32, high: u32) -> Result<(u32, Vec<PickCount>)> {
+        let matches: u32 = self.db.query_row(
+            "SELECT COUNT(DISTINCT match_id) FROM observed_picks
+             WHERE map = ?1 AND tier BETWEEN ?2 AND ?3",
+            params![map, low, high],
+            |row| row.get(0),
+        )?;
+        let mut query = self.db.prepare_cached(
+            "SELECT agent, COUNT(*), SUM(won) FROM observed_picks
+             WHERE map = ?1 AND tier BETWEEN ?2 AND ?3
+             GROUP BY agent ORDER BY COUNT(*) DESC, agent",
+        )?;
+        let rows = query.query_map(params![map, low, high], |row| {
+            Ok(PickCount { agent: row.get(0)?, picks: row.get(1)?, wins: row.get(2)? })
+        })?;
+        Ok((matches, rows.collect::<std::result::Result<_, _>>()?))
+    }
+
+    /// 指定した味方と同じチームだった試合の成績を、候補のエージェントごとに返す。
+    pub fn pair_counts(&self, map: &str, allies: &[String], low: u32, high: u32) -> Result<Vec<PickPair>> {
+        let mut query = self.db.prepare_cached(
+            "SELECT a.agent, COUNT(*), SUM(a.won)
+             FROM observed_picks a
+             JOIN observed_picks b ON a.match_id = b.match_id AND a.team = b.team AND a.agent <> b.agent
+             WHERE a.map = ?1 AND b.agent = ?2 AND a.tier BETWEEN ?3 AND ?4
+             GROUP BY a.agent",
+        )?;
+        let mut pairs = Vec::new();
+        for ally in allies {
+            let rows = query.query_map(params![map, ally, low, high], |row| {
+                Ok(PickPair { agent: row.get(0)?, ally: ally.clone(), games: row.get(1)?, wins: row.get(2)? })
+            })?;
+            pairs.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+        }
+        Ok(pairs)
+    }
+
+    /// 保存済みのすべての指標。
+    pub fn all_metrics(&self) -> Result<Vec<MatchMetrics>> {
+        let mut query = self.db.prepare_cached("SELECT metrics FROM match_metrics_v2")?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+        let mut metrics = Vec::new();
+        for row in rows {
+            metrics.push(serde_json::from_str(&row?)?);
+        }
+        Ok(metrics)
     }
 
     /// メモを保存する。タグも本文も空なら削除する。
@@ -272,6 +390,13 @@ mod tests {
             afk_penalty: None,
             last_active_ms: None,
             recent_rr: Vec::new(),
+            acs: None,
+            adr: None,
+            kast: None,
+            first_kill_percent: None,
+            first_death_percent: None,
+            damage_delta: None,
+            econ: None,
             loading: false,
             encounters: 0,
         }
@@ -288,6 +413,8 @@ mod tests {
             enemy_average: None,
             profile: None,
             score: None,
+            phase_remaining_ms: None,
+            pick_board: None,
             finished_match: None,
         }
     }
@@ -324,6 +451,44 @@ mod tests {
         };
         store.cache_review("m", &review).unwrap();
         assert_eq!(store.cached_review("m").unwrap().unwrap()["own_score"], 13);
+    }
+
+    #[test]
+    fn metrics_round_trip_and_skip_unknown_matches() {
+        let store = Store::in_memory().unwrap();
+        let metrics = MatchMetrics { match_id: "a".into(), rounds: 20, ..Default::default() };
+        assert!(!store.has_metrics("a").unwrap());
+        store.save_metrics(&metrics).unwrap();
+        assert!(store.has_metrics("a").unwrap());
+        let found = store.metrics_for(&["missing".into(), "a".into()]).unwrap();
+        assert_eq!(found, [metrics]);
+    }
+
+    #[test]
+    fn picks_are_filtered_by_map_and_rank_and_never_doubled() {
+        let mut store = Store::in_memory().unwrap();
+        let pick = |agent: &str, won, tier| ObservedPick { team: "Blue".into(), agent: agent.into(), won, tier };
+        let picks = [pick("Jett", true, 15), pick("Sage", true, 16), pick("Omen", true, 25)];
+        store.save_picks("m1", "Ascent", &picks).unwrap();
+        store.save_picks("m1", "Ascent", &picks).unwrap();
+        store.save_picks("m2", "Ascent", &[pick("Jett", false, 14)]).unwrap();
+        store.save_picks("m3", "Bind", &[pick("Jett", true, 15)]).unwrap();
+
+        let (matches, counts) = store.pick_counts("Ascent", 12, 18).unwrap();
+        assert_eq!(matches, 2);
+        assert_eq!(counts[0], PickCount { agent: "Jett".into(), picks: 2, wins: 1 });
+        assert_eq!(counts.len(), 2, "ランク帯の外は含めない");
+    }
+
+    #[test]
+    fn pairs_count_same_team_matches_only() {
+        let mut store = Store::in_memory().unwrap();
+        let pick = |team: &str, agent: &str, won| ObservedPick { team: team.into(), agent: agent.into(), won, tier: 15 };
+        store.save_picks("m1", "Ascent", &[pick("Blue", "Jett", true), pick("Blue", "Sage", true), pick("Red", "Omen", false)]).unwrap();
+        store.save_picks("m2", "Ascent", &[pick("Blue", "Jett", false), pick("Blue", "Sage", false)]).unwrap();
+
+        let pairs = store.pair_counts("Ascent", &["Sage".to_string()], 0, 30).unwrap();
+        assert_eq!(pairs, [PickPair { agent: "Jett".into(), ally: "Sage".into(), games: 2, wins: 1 }]);
     }
 
     #[test]

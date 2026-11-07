@@ -1,8 +1,9 @@
 //! 状態の監視とスナップショットの生成。
 
+use crate::analytics;
 use crate::content::Seasons;
 use crate::error::{Error, Result};
-use crate::model::{AppEvent, GameState, MatchSnapshot};
+use crate::model::{AppEvent, GameState, MatchSnapshot, PickBoard, PickStat};
 use crate::presence::{self, Presence, PrivatePresence};
 use crate::profile::{self, Profile};
 use crate::rank;
@@ -23,6 +24,9 @@ const RECONNECT: Duration = Duration::from_secs(5);
 /// エージェント選択は変化を拾うため、数ティックごとに取り直す。
 const PREGAME_REFRESH_TICKS: u32 = 2;
 const HISTORY_MATCHES: u32 = 20;
+/// ピックの観測に含める、チーム平均からのランクの幅。1 ランクは 3 段。
+const PICK_TIER_RANGE: u32 = 3;
+const PICK_MIN_MATCHES: u32 = 5;
 /// 取得に失敗した分を取り直す間隔。短いとレート制限を長引かせる。
 const INCOMPLETE_RETRY_TICKS: u32 = 10;
 /// プロフィールの取得に失敗したら、このティック数だけ待って取り直す。
@@ -151,6 +155,7 @@ pub struct Engine {
     pregame_ticks: u32,
     profile: Option<Profile>,
     profile_wait: u32,
+    skipped_metrics: HashSet<String>,
     was_in_match: bool,
     playing_match: Option<String>,
     finished_match: Option<String>,
@@ -176,6 +181,7 @@ impl Engine {
             pregame_ticks: 0,
             profile: None,
             profile_wait: 0,
+            skipped_metrics: HashSet::new(),
             was_in_match: false,
             playing_match: None,
             finished_match: None,
@@ -240,7 +246,11 @@ impl Engine {
             if self.profile.is_none() {
                 self.publish(snapshot.clone());
             }
-            snapshot.profile = self.load_profile(&puuid).await;
+            self.load_profile(&puuid).await;
+            if snapshot.state != GameState::Pregame {
+                self.sync_metrics(&puuid).await;
+            }
+            snapshot.profile = self.profile.clone();
         }
         snapshot.finished_match = self.finished_match.clone();
         Ok(snapshot)
@@ -291,7 +301,16 @@ impl Engine {
         };
 
         self.was_in_match = true;
-        let snapshot = self.build(raw, &presences, &puuid, mode, own.score).await?;
+        let mut snapshot = self.build(raw, &presences, &puuid, mode, own.score).await?;
+        self.save_cached_picks();
+        if snapshot.state == GameState::Pregame {
+            if let Some(map) = snapshot.map.clone() {
+                let tier = snapshot.ally_average.as_ref().map_or(0, |rank| rank.tier);
+                let allies: Vec<String> =
+                    snapshot.players.iter().filter_map(|player| player.agent.clone()).collect();
+                snapshot.pick_board = self.pick_board(&map, tier, &allies);
+            }
+        }
         if snapshot.state == GameState::InGame {
             self.playing_match = snapshot.match_id.clone();
             if let Some(store) = self.store.as_mut() {
@@ -340,6 +359,119 @@ impl Engine {
         );
         self.profile = Some(built.clone());
         Some(built)
+    }
+
+    fn save_picks(&mut self, match_id: &str, details: &Value) {
+        let Some(connection) = &self.connection else { return };
+        let Some((map, picks)) = analytics::observed_picks(details, &connection.catalog) else { return };
+        if let Some(store) = &mut self.store {
+            if let Err(error) = store.save_picks(match_id, &map, &picks) {
+                tracing::warn!(%error, "ピックの保存に失敗");
+            }
+        }
+    }
+
+    /// 取得済みの試合詳細からピックを保存する。味方の直近の試合も観測に使える。
+    fn save_cached_picks(&mut self) {
+        let cached: Vec<(String, Value)> = {
+            let cache = self.details.lock().expect("details cache poisoned");
+            cache
+                .iter()
+                .filter_map(|(id, cell)| Some((id.clone(), cell.get()?.clone()?)))
+                .collect()
+        };
+        for (id, details) in cached {
+            self.save_picks(&id, &details);
+        }
+    }
+
+    /// このマップの観測データを作る。ランク帯の観測が少なければ全ランクを使う。
+    fn pick_board(&self, map: &str, average_tier: u32, allies: &[String]) -> Option<PickBoard> {
+        let store = self.store.as_ref()?;
+        let low = average_tier.saturating_sub(PICK_TIER_RANGE);
+        let high = average_tier + PICK_TIER_RANGE;
+        let (mut matches, mut counts) = store.pick_counts(map, low, high).ok()?;
+        let all_ranks = matches < PICK_MIN_MATCHES;
+        if all_ranks {
+            (matches, counts) = store.pick_counts(map, 0, u32::MAX).ok()?;
+        }
+        let (pair_low, pair_high) = if all_ranks { (0, u32::MAX) } else { (low, high) };
+        let pairs = store.pair_counts(map, allies, pair_low, pair_high).unwrap_or_default();
+        let own = store.all_metrics().unwrap_or_default();
+        let on_map: Vec<_> = own.into_iter().filter(|game| game.map.as_deref() == Some(map)).collect();
+        let own_stats = analytics::summarize(&on_map).agents;
+
+        let mut agents: Vec<PickStat> = counts
+            .into_iter()
+            .map(|count| {
+                let own = own_stats.iter().find(|entry| entry.name == count.agent);
+                PickStat {
+                    pick_percent: (count.picks * 100).checked_div(matches).unwrap_or(0).min(100),
+                    win_percent: (count.wins * 100).checked_div(count.picks),
+                    picks: count.picks,
+                    own_games: own.map_or(0, |entry| entry.games),
+                    own_wins: own.map_or(0, |entry| entry.wins),
+                    own_acs: own.and_then(|entry| entry.acs),
+                    agent: count.agent,
+                }
+            })
+            .collect();
+        for entry in &own_stats {
+            if !agents.iter().any(|agent| agent.agent == entry.name) {
+                agents.push(PickStat {
+                    agent: entry.name.clone(),
+                    own_games: entry.games,
+                    own_wins: entry.wins,
+                    own_acs: entry.acs,
+                    ..Default::default()
+                });
+            }
+        }
+        Some(PickBoard { map: map.to_owned(), matches, all_ranks, low_tier: low, high_tier: high, agents, pairs })
+    }
+
+    /// 自分の試合の指標を 1 試合ずつ保存し、集計を更新する。
+    ///
+    /// 一度に取得するとレート制限に当たりやすいので、更新ごとに 1 試合だけ取る。
+    async fn sync_metrics(&mut self, puuid: &str) {
+        let Some(profile) = &self.profile else { return };
+        let ids: Vec<String> =
+            profile.history.iter().rev().filter_map(|point| point.match_id.clone()).collect();
+        let Some(store) = &self.store else { return };
+        let missing = ids
+            .iter()
+            .find(|id| !self.skipped_metrics.contains(*id) && !store.has_metrics(id).unwrap_or(true))
+            .cloned();
+
+        if let Some(id) = missing {
+            match self.source.match_details(&id).await {
+                Ok(Some(details)) => {
+                    let connection = self.connection.as_ref().expect("connected before sync");
+                    let metrics = analytics::player_metrics(puuid, &id, &details, &connection.catalog);
+                    if let (Some(metrics), Some(store)) = (metrics, &self.store) {
+                        if let Err(error) = store.save_metrics(&metrics) {
+                            tracing::warn!(%error, "指標の保存に失敗");
+                        }
+                    }
+                    self.save_picks(&id, &details);
+                }
+                Ok(None) => {
+                    self.skipped_metrics.insert(id);
+                }
+                Err(error) => tracing::warn!(%error, "試合詳細の取得に失敗"),
+            }
+        }
+
+        let Some(store) = &self.store else { return };
+        match store.metrics_for(&ids) {
+            Ok(games) if !games.is_empty() => {
+                if let Some(profile) = &mut self.profile {
+                    profile.summary = Some(analytics::summarize(&games));
+                }
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "指標の読み込みに失敗"),
+        }
     }
 
     fn reusable(&self, state: GameState) -> Option<MatchSnapshot> {

@@ -29,10 +29,13 @@ async fn main() {
     let review = analyze(demo::OWN, &scenario.matches["history-0"], &catalog);
     let source = Arc::new(ReplaySource::new(scenario));
     let diagnostics = vry_core::diagnostics::run(source.as_ref()).await;
-    let mut engine = Engine::new(source, None);
+    let store = vry_core::store::Store::in_memory().expect("store");
+    let mut engine = Engine::new(source, Some(store));
     let mut frames = Vec::new();
-    for _ in 0..15 {
+    // 集計がたまるよう数周回し、最後の 1 周を UI の確認に使う。
+    for _ in 0..70 {
         frames.push(engine.step().await.expect("demo step"));
     }
+    let frames = frames.split_off(frames.len() - 14);
     println!("{}", json!({ "frames": frames, "review": review, "diagnostics": diagnostics }));
 }

@@ -15,6 +15,8 @@ const MEDIA_PREFIX: &str = "https://media.valorant-api.com/";
 pub struct AgentImages {
     pub icon: Option<String>,
     pub portrait: Option<String>,
+    /// Duelist などの役割。
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -60,6 +62,11 @@ pub fn parse(agents: &[Value], maps: &[Value], tier_sets: &[Value]) -> ImageCata
                 let images = AgentImages {
                     icon: media_url(agent, "displayIcon"),
                     portrait: media_url(agent, "fullPortrait"),
+                    role: agent
+                        .get("role")
+                        .and_then(|role| role.get("displayName"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                 };
                 Some((name(agent)?, images))
             })

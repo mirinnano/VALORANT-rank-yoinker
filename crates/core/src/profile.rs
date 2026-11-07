@@ -1,5 +1,6 @@
 //! 自分のランクと RR の推移。試合の外でも見られる情報。
 
+use crate::analytics::Summary;
 use crate::content::Seasons;
 use crate::model::RankView;
 use crate::rank;
@@ -34,6 +35,8 @@ pub struct Profile {
     pub last_day_games: u32,
     /// 古い順。グラフの左から右へ並ぶ。
     pub history: Vec<RankPoint>,
+    /// 保存済みの試合の集計。
+    pub summary: Option<Summary>,
 }
 
 fn point(value: &Value, catalog: &GameCatalog) -> Option<RankPoint> {
@@ -90,6 +93,7 @@ pub fn build(
         last_day_rr,
         last_day_games,
         history: points,
+        summary: None,
     }
 }
 

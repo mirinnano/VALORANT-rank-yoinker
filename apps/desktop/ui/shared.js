@@ -144,6 +144,14 @@ function mapRecord(profile, map) {
   return `直近の自分 ${wins}勝${games.length - wins}敗`;
 }
 
+function percentOf(part, whole) {
+  return whole > 0 ? `${Math.floor((part * 100) / whole)}%` : null;
+}
+
+function roundPercent(record) {
+  return percentOf(record.won, record.played);
+}
+
 function formatSigned(value) {
   return value > 0 ? `+${value}` : String(value).replace("-", "−");
 }

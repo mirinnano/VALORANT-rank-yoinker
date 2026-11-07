@@ -94,26 +94,6 @@ fn mmr(d: &Demo) -> Value {
     }}}})
 }
 
-fn match_details() -> Value {
-    let players: Vec<Value> = PLAYERS
-        .iter()
-        .enumerate()
-        .map(|(i, d)| json!({"subject": d.puuid, "stats": {"kills": 12 + i * 2, "deaths": 15 - i}}))
-        .collect();
-    let stats: Vec<Value> = PLAYERS
-        .iter()
-        .enumerate()
-        .map(|(i, d)| json!({"subject": d.puuid, "damage": [
-            {"headshots": 3 + i, "bodyshots": 14, "legshots": 2}
-        ]}))
-        .collect();
-    json!({
-        "matchInfo": {"gameLengthMillis": 2_100_000},
-        "players": players,
-        "roundResults": [{"playerStats": stats}]
-    })
-}
-
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
@@ -169,7 +149,7 @@ fn review_details(seed: usize) -> Value {
                                     "timeSinceRoundStartMillis": 18_000 + round * 300})]
                     } else if (round + i + seed) % 4 == 0 {
                         let victim = PLAYERS[(i + 6) % 10].puuid;
-                        vec![json!({"killer": d.puuid, "victim": victim,
+                        vec![json!({"killer": d.puuid, "victim": victim, "assistants": [],
                                     "timeSinceRoundStartMillis": 40_000 + i * 500})]
                     } else {
                         Vec::new()
@@ -179,8 +159,8 @@ fn review_details(seed: usize) -> Value {
                         "subject": d.puuid,
                         "score": 80 + damage + kills.len() * 150,
                         "kills": kills,
-                        "damage": [{"damage": damage, "headshots": (round + i) % 3,
-                                    "bodyshots": 3, "legshots": 1}],
+                        "damage": [{"damage": damage, "receiver": PLAYERS[(i + 5) % 10].puuid,
+                                    "headshots": (round + i) % 3, "bodyshots": 3, "legshots": 1}],
                         "economy": {"spent": 3900 - (round % 4) * 800,
                                     "loadoutValue": 4300 - (round % 4) * 900, "remaining": 200}
                     })
@@ -190,6 +170,7 @@ fn review_details(seed: usize) -> Value {
                 "roundNum": round,
                 "winningTeam": if won_round(round) { "Blue" } else { "Red" },
                 "roundResult": "Eliminated",
+                "bombPlanter": PLAYERS[if round < 12 { 5 } else { 0 }].puuid,
                 "playerStats": stats
             })
         })
@@ -202,7 +183,7 @@ fn review_details(seed: usize) -> Value {
         .map(|(i, d)| {
             json!({
                 "subject": d.puuid, "gameName": d.name, "teamId": d.team,
-                "characterId": AGENTS[i].0, "competitiveTier": d.tier,
+                "characterId": AGENTS[(i + seed / 4) % 10].0, "competitiveTier": d.tier,
                 "stats": {"score": 3800 + (i + seed) * 310 % 2400, "roundsPlayed": ROUNDS,
                           "kills": 9 + (i + seed) % 12, "deaths": 10 + i % 7, "assists": 2 + i % 6}
             })
@@ -211,7 +192,7 @@ fn review_details(seed: usize) -> Value {
 
     json!({
         "matchInfo": {"mapId": "/Game/Maps/Ascent/Ascent", "queueID": "competitive",
-                      "gameStartMillis": 1_790_000_000_000_i64, "gameLengthMillis": 2_400_000},
+                      "gameStartMillis": now_ms() - seed as i64 * 18_000_000, "gameLengthMillis": 2_400_000},
         "players": players,
         "teams": [
             {"teamId": "Blue", "won": blue_wins * 2 > ROUNDS, "roundsWon": blue_wins},
@@ -237,7 +218,7 @@ pub fn scenario() -> Scenario {
     for (i, d) in PLAYERS.iter().enumerate() {
         mmrs.insert(d.puuid.to_owned(), mmr(d));
         let first = json!({
-            "MatchID": "demo-history", "RankedRatingEarned": 18 - (i as i32) * 6,
+            "MatchID": "history-0", "RankedRatingEarned": 18 - (i as i32) * 6,
             "AFKPenalty": 0, "MatchStartTime": now_ms() - (i as i64 + 1) * 3_600_000 * 20
         });
         let older = (1..5).map(|age| {
@@ -258,6 +239,7 @@ pub fn scenario() -> Scenario {
         timeline,
         pregame: Some(json!({
             "ID": "demo-match", "MapID": "/Game/Maps/Ascent/Ascent",
+            "PhaseTimeRemainingNS": 72_000_000_000_u64,
             "AllyTeam": {"TeamID": "Blue", "Players": allies}
         })),
         coregame: Some(json!({
@@ -268,8 +250,7 @@ pub fn scenario() -> Scenario {
         updates,
         history: Some(rank_history()),
         fail_history: false,
-        matches: std::iter::once(("demo-history".to_owned(), match_details()))
-            .chain(std::iter::once(("demo-match".to_owned(), review_details(0))))
+        matches: std::iter::once(("demo-match".to_owned(), review_details(0)))
             .chain((0..20).map(|i| (format!("history-{i}"), review_details(i))))
             .collect(),
         content: json!({"Seasons": [

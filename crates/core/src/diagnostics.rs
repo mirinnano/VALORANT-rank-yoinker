@@ -63,6 +63,13 @@ const MATCH_FIELDS: [Field; 15] = [
     ("roundResults.*.playerStats.*.damage.*.damage", Unconfirmed),
     ("roundResults.*.playerStats.*.economy.loadoutValue", Unconfirmed),
 ];
+const ANALYTICS_FIELDS: [Field; 5] = [
+    ("roundResults.*.playerStats.*.damage.*.receiver", Unconfirmed),
+    ("roundResults.*.playerStats.*.economy.spent", Unconfirmed),
+    ("roundResults.*.playerStats.*.kills.*.assistants", Unconfirmed),
+    ("roundResults.*.bombPlanter", Unconfirmed),
+    ("roundResults.*.playerStats.*.economy.loadoutValue", Unconfirmed),
+];
 const KILL_TIME_FIELDS: [&str; 2] = [
     "roundResults.*.playerStats.*.kills.*.timeSinceRoundStartMillis",
     "roundResults.*.playerStats.*.kills.*.roundTime",
@@ -78,7 +85,8 @@ const LIVE_SCORE_FIELDS: [Field; 2] = [
     ("partyOwnerMatchScoreAllyTeam", Unconfirmed),
     ("partyOwnerMatchScoreEnemyTeam", Unconfirmed),
 ];
-const PREGAME_FIELDS: [Field; 5] = [
+const PREGAME_FIELDS: [Field; 6] = [
+    ("PhaseTimeRemainingNS", Unconfirmed),
     ("ID", Confirmed),
     ("AllyTeam.Players.*.Subject", Confirmed),
     ("AllyTeam.Players.*.CharacterID", Confirmed),
@@ -230,6 +238,7 @@ fn check_review(own: &str, details: &Value, source_catalog: &crate::source::Game
         }
     }
     checks.push(schema);
+    checks.push(judge_value("指標の計算", &ANALYTICS_FIELDS, details));
 
     const LABEL: &str = "振り返りの集計";
     let Some(result) = review::analyze(own, details, source_catalog) else {

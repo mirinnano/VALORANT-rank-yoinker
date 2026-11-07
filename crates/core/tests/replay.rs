@@ -130,6 +130,19 @@ async fn players_appear_before_their_ranks_finish_loading() {
 }
 
 #[tokio::test]
+async fn pick_board_uses_observed_matches() {
+    let mut scenario = demo::scenario();
+    scenario.timeline = vec![scenario.timeline[MENUS].clone()];
+    let (mut engine, _) = engine(scenario);
+    let snapshot = advance(&mut engine, 1).await;
+    let board = snapshot.pick_board.expect("エージェント選択で観測を出す");
+    assert_eq!(board.map, "Ascent");
+    assert!(board.matches >= 1);
+    assert!(!board.agents.is_empty());
+    assert_eq!(snapshot.phase_remaining_ms, Some(72_000));
+}
+
+#[tokio::test]
 async fn finished_match_is_reported_after_returning_to_menus() {
     let (mut engine, _) = engine(demo::scenario());
     let before = advance(&mut engine, MENUS).await;
