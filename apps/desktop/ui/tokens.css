@@ -1,0 +1,82 @@
+:root {
+  --ink: #0b0b0c;
+  --ink-2: #151517;
+  --ink-3: #202023;
+  --paper: #f2f1ec;
+  --mute: #a3a29d;
+  --line: rgb(242 241 236 / 16%);
+  --red: #ff2a1a;
+  --yellow: #ffe100;
+  --blue: #5b6dff;
+  --pink: #ff3fa4;
+  --scrim: rgb(11 11 12 / 72%);
+  --dot-size: 5px;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --display: "Archivo", "Bahnschrift", "Murecho", "Yu Gothic UI", "Hiragino Sans", sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, "Murecho", "Yu Gothic UI", monospace;
+  --jp: "Murecho", "Yu Gothic UI", "Hiragino Sans", sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  font-family: var(--jp);
+  font-variant-numeric: tabular-nums;
+  color: var(--paper);
+}
+@keyframes waiting-breath {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+::selection { background: var(--red); color: var(--ink); }
+
+/* 網点。画像をモノクロにして、上から点を重ねる */
+.halftone { position: relative; isolation: isolate; overflow: hidden; background: var(--ink); }
+.halftone-image {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: grayscale(1) contrast(1.25) brightness(0.9);
+}
+/* 文字の読みやすさを保つ、無彩色の幕 */
+.halftone::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(90deg, rgb(11 11 12 / 88%) 0%, rgb(11 11 12 / 62%) 45%, rgb(11 11 12 / 20%) 100%);
+}
+.halftone::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image: radial-gradient(circle at center, var(--ink) 38%, transparent 42%);
+  background-size: var(--dot-size) var(--dot-size);
+}
+
+.agent-icon, .rank-icon { flex: none; display: block; object-fit: contain; }
+.agent-icon { border-radius: 50%; background: var(--ink-3); object-fit: cover; }
+.icon-blank { display: block; flex: none; border-radius: 50%; background: var(--ink-3); }
+.period { display: inline-block; width: 0.22em; height: 0.22em; margin-left: 0.06em; background: var(--red); }
+.display {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  line-height: 0.9;
+  text-transform: uppercase;
+}
+.form { display: inline-flex; gap: 2px; }
+.form i { width: 7px; height: 7px; background: var(--mute); }
+.form i.is-win { background: var(--paper); }
+.form i.is-loss { background: var(--red); }
+.label { font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; color: var(--mute); }
+.label b { color: var(--red); font-weight: 400; }

@@ -1,3 +1,7 @@
+> **Rewrite in progress.** The `rewrite` branch contains a Rust and Tauri desktop app in
+> `crates/core` and `apps/desktop`. Run it without VALORANT by setting `VRY_REPLAY=demo`:
+> `VRY_REPLAY=demo cargo run -p vry-desktop`. The Python sources stay until the rewrite reaches parity.
+
 <p align="center">
     <a href="https://github.com/isaacKenyon/valorant-rank-yoinker/">
         <img src="assets/Logo.png" alt="Logo" width="160" height="160">

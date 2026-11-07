@@ -1,0 +1,19 @@
+[package]
+name = "vry-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = "0.1.92"
+base64 = "0.23.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "json", "http2"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "test-util", "macros", "rt"] }

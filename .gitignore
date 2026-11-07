@@ -151,3 +151,6 @@ env/
 tempCodeRunnerFile.py
 vRY.lnk
 node_modules
+
+# Tauri generated files
+apps/desktop/src-tauri/gen/

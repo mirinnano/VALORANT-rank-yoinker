@@ -1,0 +1,27 @@
+name: Desktop
+
+on:
+  push:
+    branches: [rewrite]
+  pull_request:
+    paths:
+      - "crates/**"
+      - "apps/desktop/**"
+      - "Cargo.*"
+      - ".github/workflows/desktop.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p vry-core --locked
+      - run: cargo build -p vry-desktop --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vry-desktop-windows
+          path: target/release/vry-desktop.exe

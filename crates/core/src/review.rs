@@ -1,0 +1,497 @@
+//! 試合詳細を集計し、振り返りの材料を作る。
+//!
+//! 試合詳細には他のプレイヤーの名前が含まれる場合がある。ここでは名前を読まず、
+//! 自分以外はエージェント名だけで扱う。
+
+use crate::rank;
+use crate::source::GameCatalog;
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::HashMap;
+
+const OPENING_DEATH_MIN: u32 = 4;
+const OPENING_DEATH_RATIO: f64 = 0.2;
+const LOSS_STREAK_MIN: usize = 4;
+const FULL_BUY_LOADOUT: i64 = 3900;
+const LOW_DAMAGE: i64 = 50;
+const LOW_IMPACT_MIN: usize = 3;
+const MULTI_KILL: u32 = 3;
+const SCORE_MARGIN: f64 = 0.15;
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ScoreLine {
+    /// 自分以外はエージェント名。
+    pub label: String,
+    pub agent: Option<String>,
+    pub is_own: bool,
+    pub is_ally: bool,
+    pub rank: &'static str,
+    pub tier: u32,
+    pub acs: u32,
+    pub kills: u32,
+    pub deaths: u32,
+    pub assists: u32,
+    pub adr: u32,
+    pub headshot_percent: Option<u32>,
+    pub first_kills: u32,
+    pub first_deaths: u32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RoundLine {
+    /// 1 から数える。
+    pub number: u32,
+    pub won: bool,
+    pub kills: u32,
+    pub damage: i64,
+    pub died: bool,
+    pub first_kill: bool,
+    pub first_death: bool,
+    pub loadout: i64,
+    pub spent: i64,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingTone {
+    Strength,
+    Focus,
+}
+
+/// データから読み取れる事実。評価ではなく、見直す場所の提案として示す。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Finding {
+    pub tone: FindingTone,
+    pub title: String,
+    pub detail: String,
+    pub rounds: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct MatchReview {
+    pub match_id: String,
+    pub map: Option<String>,
+    pub started_ms: i64,
+    pub length_ms: i64,
+    pub won: Option<bool>,
+    pub own_score: u32,
+    pub enemy_score: u32,
+    pub own: ScoreLine,
+    pub team_acs: u32,
+    pub team_adr: u32,
+    pub lines: Vec<ScoreLine>,
+    pub rounds: Vec<RoundLine>,
+    pub findings: Vec<Finding>,
+}
+
+fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key)?.as_str()
+}
+
+fn int(value: &Value, key: &str) -> i64 {
+    value.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+fn list<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn kill_time(kill: &Value) -> i64 {
+    kill.get("timeSinceRoundStartMillis")
+        .or_else(|| kill.get("roundTime"))
+        .and_then(Value::as_i64)
+        .unwrap_or(i64::MAX)
+}
+
+#[derive(Default, Clone)]
+struct Tally {
+    damage: i64,
+    hits: i64,
+    headshots: i64,
+    first_kills: u32,
+    first_deaths: u32,
+}
+
+/// 各ラウンドの最初のキルを `(killer, victim)` で返す。
+fn opening_kill(round: &Value) -> Option<(&str, &str)> {
+    list(round, "playerStats")
+        .iter()
+        .flat_map(|player| list(player, "kills"))
+        .min_by_key(|kill| kill_time(kill))
+        .and_then(|kill| Some((text(kill, "killer")?, text(kill, "victim")?)))
+}
+
+fn tally_players(rounds: &[Value]) -> HashMap<&str, Tally> {
+    let mut tallies: HashMap<&str, Tally> = HashMap::new();
+    for round in rounds {
+        for player in list(round, "playerStats") {
+            let Some(subject) = text(player, "subject") else { continue };
+            let tally = tallies.entry(subject).or_default();
+            for damage in list(player, "damage") {
+                tally.damage += int(damage, "damage");
+                let head = int(damage, "headshots");
+                tally.headshots += head;
+                tally.hits += head + int(damage, "bodyshots") + int(damage, "legshots");
+            }
+        }
+        if let Some((killer, victim)) = opening_kill(round) {
+            tallies.entry(killer).or_default().first_kills += 1;
+            tallies.entry(victim).or_default().first_deaths += 1;
+        }
+    }
+    tallies
+}
+
+fn round_line(round: &Value, index: usize, own: &str, team: Option<&str>) -> RoundLine {
+    let own_stats = list(round, "playerStats").iter().find(|p| text(p, "subject") == Some(own));
+    let null = Value::Null;
+    let stats = own_stats.unwrap_or(&null);
+    let economy = stats.get("economy").unwrap_or(&null);
+    let opening = opening_kill(round);
+    let died = list(round, "playerStats")
+        .iter()
+        .flat_map(|player| list(player, "kills"))
+        .any(|kill| text(kill, "victim") == Some(own));
+
+    RoundLine {
+        number: int(round, "roundNum").max(index as i64) as u32 + 1,
+        won: team.is_some() && text(round, "winningTeam") == team,
+        kills: list(stats, "kills").len() as u32,
+        damage: list(stats, "damage").iter().map(|d| int(d, "damage")).sum(),
+        died,
+        first_kill: opening.is_some_and(|(killer, _)| killer == own),
+        first_death: opening.is_some_and(|(_, victim)| victim == own),
+        loadout: int(economy, "loadoutValue"),
+        spent: int(economy, "spent"),
+        result: text(round, "roundResult").map(str::to_owned),
+    }
+}
+
+fn score_line(
+    player: &Value,
+    own: &str,
+    my_team: Option<&str>,
+    rounds_played: u32,
+    tallies: &HashMap<&str, Tally>,
+    catalog: &GameCatalog,
+) -> ScoreLine {
+    let null = Value::Null;
+    let subject = text(player, "subject").unwrap_or_default();
+    let stats = player.get("stats").unwrap_or(&null);
+    let tally = tallies.get(subject).cloned().unwrap_or_default();
+    let rounds = i64::from(rounds_played.max(1));
+    let is_own = subject == own;
+    let agent = text(player, "characterId")
+        .and_then(|id| catalog.agents.get(&id.to_lowercase()))
+        .cloned();
+    let tier = int(player, "competitiveTier").max(0) as u32;
+
+    ScoreLine {
+        label: if is_own { "あなた".to_owned() } else { agent.clone().unwrap_or_else(|| "Player".to_owned()) },
+        agent,
+        is_own,
+        is_ally: text(player, "teamId") == my_team,
+        rank: rank::tier_name(tier),
+        tier,
+        acs: (int(stats, "score") / rounds) as u32,
+        kills: int(stats, "kills") as u32,
+        deaths: int(stats, "deaths") as u32,
+        assists: int(stats, "assists") as u32,
+        adr: (tally.damage / rounds) as u32,
+        headshot_percent: (tally.hits > 0).then(|| (tally.headshots * 100 / tally.hits) as u32),
+        first_kills: tally.first_kills,
+        first_deaths: tally.first_deaths,
+    }
+}
+
+fn numbers(rounds: impl Iterator<Item = u32>) -> String {
+    rounds.map(|n| n.to_string()).collect::<Vec<_>>().join("、")
+}
+
+fn longest_loss_streak(rounds: &[RoundLine]) -> Vec<u32> {
+    let mut best: Vec<u32> = Vec::new();
+    let mut current = Vec::new();
+    for round in rounds {
+        if round.won {
+            current.clear();
+        } else {
+            current.push(round.number);
+            if current.len() > best.len() {
+                best = current.clone();
+            }
+        }
+    }
+    best
+}
+
+fn findings(review_rounds: &[RoundLine], own: &ScoreLine, team_acs: u32) -> Vec<Finding> {
+    let mut found = Vec::new();
+    let played = review_rounds.len().max(1) as f64;
+
+    let opening: Vec<u32> = review_rounds.iter().filter(|r| r.first_death).map(|r| r.number).collect();
+    let opening_count = opening.len() as u32;
+    if opening_count >= OPENING_DEATH_MIN && f64::from(opening_count) / played >= OPENING_DEATH_RATIO {
+        found.push(Finding {
+            tone: FindingTone::Focus,
+            title: format!("最初に倒された: {opening_count} ラウンド"),
+            detail: format!("第 {} ラウンド。立ち位置と入るタイミングを見直せます。", numbers(opening.iter().copied())),
+            rounds: opening,
+        });
+    }
+
+    let streak = longest_loss_streak(review_rounds);
+    if streak.len() >= LOSS_STREAK_MIN {
+        found.push(Finding {
+            tone: FindingTone::Focus,
+            title: format!("{} 連敗の区間", streak.len()),
+            detail: format!("第 {} から第 {} ラウンド。流れを変える手がなかったかを確認できます。",
+                streak[0], streak[streak.len() - 1]),
+            rounds: streak,
+        });
+    }
+
+    let low: Vec<u32> = review_rounds
+        .iter()
+        .filter(|r| !r.won && r.loadout >= FULL_BUY_LOADOUT && r.damage < LOW_DAMAGE)
+        .map(|r| r.number)
+        .collect();
+    if low.len() >= LOW_IMPACT_MIN {
+        found.push(Finding {
+            tone: FindingTone::Focus,
+            title: format!("フルバイで与ダメージ {LOW_DAMAGE} 未満: {} ラウンド", low.len()),
+            detail: format!("第 {} ラウンド。装備が揃っていたのに撃ち合えなかった場面です。", numbers(low.iter().copied())),
+            rounds: low,
+        });
+    }
+
+    let multi: Vec<u32> = review_rounds.iter().filter(|r| r.kills >= MULTI_KILL).map(|r| r.number).collect();
+    if !multi.is_empty() {
+        found.push(Finding {
+            tone: FindingTone::Strength,
+            title: format!("{MULTI_KILL} キル以上: {} ラウンド", multi.len()),
+            detail: format!("第 {} ラウンド。再現したい場面です。", numbers(multi.iter().copied())),
+            rounds: multi,
+        });
+    }
+
+    if team_acs > 0 {
+        let ratio = f64::from(own.acs) / f64::from(team_acs);
+        if ratio >= 1.0 + SCORE_MARGIN {
+            found.push(Finding {
+                tone: FindingTone::Strength,
+                title: format!("ACS がチーム平均を上回った: {} 対 {team_acs}", own.acs),
+                detail: "撃ち合いでチームを支えていました。".to_owned(),
+                rounds: Vec::new(),
+            });
+        } else if ratio <= 1.0 - SCORE_MARGIN {
+            found.push(Finding {
+                tone: FindingTone::Focus,
+                title: format!("ACS がチーム平均を下回った: {} 対 {team_acs}", own.acs),
+                detail: "アビリティで貢献した試合なら、数字より役割で振り返ってください。".to_owned(),
+                rounds: Vec::new(),
+            });
+        }
+    }
+
+    if own.first_kills > own.first_deaths && own.first_kills >= 3 {
+        found.push(Finding {
+            tone: FindingTone::Strength,
+            title: format!("先手を取れた: {} 回、取られた: {} 回", own.first_kills, own.first_deaths),
+            detail: "初動の撃ち合いで優位でした。".to_owned(),
+            rounds: Vec::new(),
+        });
+    }
+    found
+}
+
+/// 試合詳細を集計する。自分が参加していない試合は `None`。
+pub fn analyze(own: &str, details: &Value, catalog: &GameCatalog) -> Option<MatchReview> {
+    let null = Value::Null;
+    let players = list(details, "players");
+    let own_player = players.iter().find(|p| text(p, "subject") == Some(own))?;
+    let my_team = text(own_player, "teamId");
+    let info = details.get("matchInfo").unwrap_or(&null);
+    let raw_rounds = list(details, "roundResults");
+    let rounds_played = raw_rounds.len() as u32;
+    let tallies = tally_players(raw_rounds);
+
+    let mut lines: Vec<ScoreLine> = players
+        .iter()
+        .map(|player| score_line(player, own, my_team, rounds_played, &tallies, catalog))
+        .collect();
+    lines.sort_by(|a, b| b.is_ally.cmp(&a.is_ally).then(b.acs.cmp(&a.acs)));
+
+    let rounds: Vec<RoundLine> = raw_rounds
+        .iter()
+        .enumerate()
+        .map(|(index, round)| round_line(round, index, own, my_team))
+        .collect();
+
+    let allies: Vec<&ScoreLine> = lines.iter().filter(|line| line.is_ally).collect();
+    let average = |field: fn(&ScoreLine) -> u32| {
+        allies.iter().map(|line| field(line)).sum::<u32>() / (allies.len().max(1) as u32)
+    };
+    let team_acs = average(|line| line.acs);
+    let team_adr = average(|line| line.adr);
+
+    let own_line = lines.iter().find(|line| line.is_own)?.clone();
+    let wins = |won: bool| rounds.iter().filter(|round| round.won == won).count() as u32;
+    let own_team = list(details, "teams").iter().find(|team| text(team, "teamId") == my_team);
+
+    Some(MatchReview {
+        match_id: text(info, "matchId").unwrap_or_default().to_owned(),
+        map: text(info, "mapId").and_then(|id| catalog.maps.get(&id.to_lowercase())).cloned(),
+        started_ms: int(info, "gameStartMillis"),
+        length_ms: int(info, "gameLengthMillis"),
+        won: own_team.and_then(|team| team.get("won")).and_then(Value::as_bool),
+        own_score: wins(true),
+        enemy_score: wins(false),
+        findings: findings(&rounds, &own_line, team_acs),
+        own: own_line,
+        team_acs,
+        team_adr,
+        lines,
+        rounds,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn catalog() -> GameCatalog {
+        let mut catalog = GameCatalog::default();
+        catalog.agents.insert("a-jett".into(), "Jett".into());
+        catalog.agents.insert("a-sage".into(), "Sage".into());
+        catalog.agents.insert("a-omen".into(), "Omen".into());
+        catalog
+    }
+
+    fn player(subject: &str, team: &str, agent: &str, score: u32) -> Value {
+        json!({"subject": subject, "gameName": format!("Real{subject}"), "teamId": team,
+               "characterId": agent, "competitiveTier": 15,
+               "stats": {"score": score, "kills": 10, "deaths": 8, "assists": 3}})
+    }
+
+    fn round(number: u32, winner: &str, first: (&str, &str), damage: i64, loadout: i64) -> Value {
+        json!({
+            "roundNum": number, "winningTeam": winner, "roundResult": "Eliminated",
+            "playerStats": [
+                {"subject": first.0, "kills": [
+                    {"killer": first.0, "victim": first.1, "timeSinceRoundStartMillis": 1000}
+                ]},
+                {"subject": "me", "damage": [{"damage": damage, "headshots": 1, "bodyshots": 3, "legshots": 0}],
+                 "economy": {"loadoutValue": loadout, "spent": 3000}, "kills": []}
+            ]
+        })
+    }
+
+    fn details(rounds: Vec<Value>) -> Value {
+        json!({
+            "matchInfo": {"mapId": "/m"},
+            "players": [
+                player("me", "Blue", "a-jett", 4000),
+                player("mate", "Blue", "a-sage", 2000),
+                player("foe", "Red", "a-omen", 3000)
+            ],
+            "teams": [{"teamId": "Blue", "won": false}],
+            "roundResults": rounds
+        })
+    }
+
+    #[test]
+    fn computes_scores_and_opening_kills() {
+        let rounds = vec![
+            round(0, "Blue", ("me", "foe"), 150, 4000),
+            round(1, "Red", ("foe", "me"), 30, 4000),
+        ];
+        let r = analyze("me", &details(rounds), &catalog()).unwrap();
+        assert_eq!(r.own.acs, 2000);
+        assert_eq!(r.own.adr, 90);
+        assert_eq!(r.own.headshot_percent, Some(25));
+        assert_eq!((r.own.first_kills, r.own.first_deaths), (1, 1));
+        assert_eq!((r.own_score, r.enemy_score), (1, 1));
+        assert_eq!(r.won, Some(false));
+        assert_eq!(r.team_acs, 1500);
+        assert!(r.rounds[0].first_kill && !r.rounds[0].died);
+        assert!(r.rounds[1].first_death && r.rounds[1].died);
+    }
+
+    #[test]
+    fn others_are_labelled_by_agent_only() {
+        let r = analyze("me", &details(vec![round(0, "Blue", ("me", "foe"), 1, 1)]), &catalog()).unwrap();
+        let labels: Vec<_> = r.lines.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, ["あなた", "Sage", "Omen"]);
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("Realfoe") && !json.contains("Realmate"));
+    }
+
+    #[test]
+    fn match_without_own_player_is_none() {
+        assert!(analyze("nobody", &details(Vec::new()), &catalog()).is_none());
+    }
+
+    #[test]
+    fn empty_rounds_do_not_divide_by_zero() {
+        let r = analyze("me", &details(Vec::new()), &catalog()).unwrap();
+        assert_eq!(r.own_score, 0);
+        assert!(r.rounds.is_empty());
+    }
+
+    #[test]
+    fn opening_kill_uses_the_earliest_time() {
+        let value = json!({"playerStats": [
+            {"kills": [{"killer": "late", "victim": "x", "timeSinceRoundStartMillis": 9000}]},
+            {"kills": [{"killer": "early", "victim": "y", "roundTime": 2000}]}
+        ]});
+        assert_eq!(opening_kill(&value), Some(("early", "y")));
+    }
+
+    #[test]
+    fn repeated_opening_deaths_become_a_focus_with_rounds() {
+        let rounds: Vec<Value> =
+            (0..6).map(|n| round(n, "Blue", ("foe", "me"), 100, 1000)).collect();
+        let r = analyze("me", &details(rounds), &catalog()).unwrap();
+        let finding = r.findings.iter().find(|f| f.title.contains("最初に倒された")).unwrap();
+        assert_eq!(finding.tone, FindingTone::Focus);
+        assert_eq!(finding.rounds, [1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn three_opening_deaths_are_not_flagged() {
+        let mut rounds: Vec<Value> =
+            (0..3).map(|n| round(n, "Blue", ("foe", "me"), 100, 1000)).collect();
+        rounds.extend((3..10).map(|n| round(n, "Blue", ("me", "foe"), 100, 1000)));
+        let r = analyze("me", &details(rounds), &catalog()).unwrap();
+        assert!(!r.findings.iter().any(|f| f.title.contains("最初に倒された")));
+    }
+
+    #[test]
+    fn loss_streak_uses_the_longest_run() {
+        let winners = ["Red", "Red", "Blue", "Red", "Red", "Red", "Red", "Blue"];
+        let rounds: Vec<Value> = winners
+            .iter()
+            .enumerate()
+            .map(|(n, w)| round(n as u32, w, ("me", "foe"), 100, 1000))
+            .collect();
+        let r = analyze("me", &details(rounds), &catalog()).unwrap();
+        let finding = r.findings.iter().find(|f| f.title.contains("連敗")).unwrap();
+        assert_eq!(finding.rounds, [4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn low_damage_full_buys_are_listed_but_won_rounds_are_not() {
+        let rounds = vec![
+            round(0, "Red", ("foe", "mate"), 20, 4000),
+            round(1, "Red", ("foe", "mate"), 20, 4000),
+            round(2, "Blue", ("foe", "mate"), 20, 4000),
+            round(3, "Red", ("foe", "mate"), 20, 4000),
+            round(4, "Red", ("foe", "mate"), 20, 1000),
+        ];
+        let r = analyze("me", &details(rounds), &catalog()).unwrap();
+        let finding = r.findings.iter().find(|f| f.title.contains("フルバイ")).unwrap();
+        assert_eq!(finding.rounds, [1, 2, 4]);
+    }
+}

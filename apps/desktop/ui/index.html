@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>vRY Desktop</title>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wght@1,800;1,900&family=JetBrains+Mono:wght@400;600&family=Murecho:wght@400;600;800&display=swap">
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="main.css">
+</head>
+<body>
+  <header>
+    <div class="brand">vRY<i></i></div>
+    <div class="heading">
+      <h1 id="title">VALORANT を待っています</h1>
+      <p id="subtitle" role="status"></p>
+    </div>
+    <nav aria-label="画面">
+      <button type="button" data-view="home" aria-pressed="true">ホーム</button>
+      <button type="button" data-view="match" aria-pressed="false">対戦</button>
+      <button type="button" data-view="review" aria-pressed="false">振り返り</button>
+      <button type="button" data-view="history" aria-pressed="false">遭遇履歴</button>
+      <button type="button" data-view="settings" aria-pressed="false">設定</button>
+    </nav>
+  </header>
+  <main id="home-view"></main>
+  <main id="match-view" hidden></main>
+  <main id="review-view" hidden></main>
+  <main id="history-view" hidden></main>
+  <main id="settings-view" hidden>
+    <section class="settings" aria-labelledby="notify-title">
+      <h2 id="notify-title">Match alert</h2>
+      <label class="setting">
+        <input id="match-alert" type="checkbox">
+        <span>
+          <b>マッチが成立したら知らせる</b>
+          <small>音とタスクバーの点滅、Windows の通知で知らせます。</small>
+        </span>
+      </label>
+      <button id="test-alert" class="tag" type="button">音を試す</button>
+    </section>
+    <section class="settings" aria-labelledby="diagnostics-title">
+      <h2 id="diagnostics-title">Diagnostics</h2>
+      <p class="settings-note">うまく動かないときに実行します。エージェント選択中や試合中に実行すると、確認できる項目が増えます。</p>
+      <div class="diagnostic-actions">
+        <button id="run-diagnostics" class="primary" type="button">診断を実行</button>
+        <button id="copy-report" class="tag" type="button" disabled>結果をコピー</button>
+        <button id="save-recording" class="tag" type="button">匿名の記録を保存</button>
+      </div>
+      <p id="diagnostic-status" class="settings-note" role="status"></p>
+      <ol id="diagnostic-results" class="checks"></ol>
+      <p class="settings-note">結果には項目名だけが含まれ、そのまま共有できます。記録は名前と ID を置き換えて保存しますが、共有する前に中身を確認してください。</p>
+    </section>
+  </main>
+  <script src="shared.js"></script>
+  <script src="home.js"></script>
+  <script src="match.js"></script>
+  <script src="review.js"></script>
+  <script src="history.js"></script>
+  <script src="diagnostics.js"></script>
+  <script src="alert.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
