@@ -220,6 +220,8 @@ pub fn build_snapshot(raw: &RawMatch, ctx: &BuildContext) -> MatchSnapshot {
         phase_remaining_ms: raw.phase_remaining_ms,
         pick_board: None,
         finished_match: None,
+        lobby: None,
+        realtime: false,
         state: raw.state,
         match_id: raw.match_id.clone(),
         mode: ctx.mode.clone(),

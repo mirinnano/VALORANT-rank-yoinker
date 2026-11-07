@@ -5,9 +5,9 @@
 
 use crate::error::{Error, Result};
 use crate::local::{parse_client_log, read_lossy, LocalPaths, Lockfile};
-use crate::presence::{self, Presence};
+use crate::presence::{self, LiveEvent, Presence};
 use crate::retry::{with_policy, Reply};
-use crate::source::{GameCatalog, RiotSource};
+use crate::source::{GameCatalog, LiveSignals, RiotSource};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::{header, redirect, Client, Method, RequestBuilder};
@@ -16,10 +16,10 @@ use native_tls::TlsConnector;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, Notify, OnceCell, RwLock, Semaphore};
+use tokio::sync::{Mutex, OnceCell, RwLock, Semaphore};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
@@ -34,7 +34,10 @@ const MAX_CONCURRENT: usize = 4;
 const MIN_INTERVAL: Duration = Duration::from_millis(150);
 const RATE_LIMIT_HOLD: Duration = Duration::from_secs(5);
 const EVENT_RECONNECT: Duration = Duration::from_secs(5);
-const PRESENCE_SUBSCRIPTION: &str = r#"[5, "OnJsonApiEvent_chat_v4_presences"]"#;
+const EVENT_SUBSCRIPTIONS: [&str; 2] = [
+    r#"[5, "OnJsonApiEvent_chat_v4_presences"]"#,
+    r#"[5, "OnJsonApiEvent_riot-messaging-service_v1_message"]"#,
+];
 
 /// WebSocket のエラー。URL を含まないよう文字列にしない。
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +79,7 @@ pub struct LiveSource {
     next_slot: Mutex<Instant>,
     catalog: OnceCell<GameCatalog>,
     events_connected: AtomicBool,
+    events_received: AtomicU64,
 }
 
 impl LiveSource {
@@ -96,6 +100,7 @@ impl LiveSource {
             next_slot: Mutex::new(Instant::now()),
             catalog: OnceCell::new(),
             events_connected: AtomicBool::new(false),
+            events_received: AtomicU64::new(0),
         })
     }
 
@@ -154,28 +159,49 @@ impl LiveSource {
     }
 
     /// Riot Client の WebSocket へ接続し、自分の状態が変わるたびに起こす。
-    async fn read_events(&self, session: &Session, wake: &Notify) -> std::result::Result<(), EventError> {
+    async fn read_events(&self, session: &Session, signals: &LiveSignals) -> std::result::Result<(), EventError> {
         let auth = STANDARD.encode(format!("riot:{}", session.lockfile.password));
         let mut request = format!("wss://127.0.0.1:{}", session.lockfile.port).into_client_request()?;
         let value = format!("Basic {auth}").parse().map_err(|_| EventError::Header)?;
         request.headers_mut().insert(header::AUTHORIZATION, value);
 
         // 自己署名証明書を受け入れるのは、この 127.0.0.1 への接続だけ。
-        let tls = TlsConnector::builder().danger_accept_invalid_certs(true).build()?;
+        let tls = TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true)
+            .build()?;
         let (mut socket, _) =
             connect_async_tls_with_config(request, None, false, Some(Connector::NativeTls(tls))).await?;
-        socket.send(Message::text(PRESENCE_SUBSCRIPTION)).await?;
+        for subscription in EVENT_SUBSCRIPTIONS {
+            socket.send(Message::text(subscription)).await?;
+        }
 
         self.events_connected.store(true, Ordering::Relaxed);
+        signals.wake.notify_one();
         tracing::info!("WebSocket に接続");
         let mut last = None;
         while let Some(message) = socket.next().await {
             let Message::Text(text) = message? else { continue };
-            let Some(own) = presence::own_presence_event(text.as_str(), &session.puuid) else { continue };
-            let current = (own.state, own.party_state);
-            if last.as_ref() != Some(&current) {
-                last = Some(current);
-                wake.notify_one();
+            let Some(event) = presence::parse_live_event(text.as_str(), &session.puuid) else { continue };
+            if self.events_received.fetch_add(1, Ordering::Relaxed) == 0 {
+                tracing::info!("WebSocket の最初のイベントを受信");
+            }
+            match event {
+                // 状態だけでなく、スコアや人数の変化でも起こす。
+                LiveEvent::OwnPresence(own) => {
+                    if last.as_ref() != Some(&own) {
+                        last = Some(own);
+                        signals.wake.notify_one();
+                    }
+                }
+                LiveEvent::PartyChanged => {
+                    signals.party_changed.store(true, Ordering::Relaxed);
+                    signals.wake.notify_one();
+                }
+                LiveEvent::PregameChanged => {
+                    signals.pregame_changed.store(true, Ordering::Relaxed);
+                    signals.wake.notify_one();
+                }
             }
         }
         Ok(())
@@ -348,15 +374,39 @@ impl RiotSource for LiveSource {
         .await
     }
 
-    async fn rank_history(&self, puuid: &str, count: u32) -> Result<Option<Value>> {
+    async fn rank_history(&self, puuid: &str, start: u32, end: u32) -> Result<Option<Value>> {
         self.pd(format!(
-            "/mmr/v1/players/{puuid}/competitiveupdates?startIndex=0&endIndex={count}&queue=competitive"
+            "/mmr/v1/players/{puuid}/competitiveupdates?startIndex={start}&endIndex={end}&queue=competitive"
         ))
         .await
     }
 
     async fn match_details(&self, match_id: &str) -> Result<Option<Value>> {
         self.pd(format!("/match-details/v1/matches/{match_id}")).await
+    }
+
+    async fn party_player(&self, puuid: &str) -> Result<Option<Value>> {
+        self.glz(format!("/parties/v1/players/{puuid}")).await
+    }
+
+    async fn party(&self, party_id: &str) -> Result<Option<Value>> {
+        self.glz(format!("/parties/v1/parties/{party_id}")).await
+    }
+
+    async fn set_party_invite(&self, party_id: &str, enabled: bool) -> Result<Option<Value>> {
+        let method = if enabled { Method::POST } else { Method::DELETE };
+        let path = format!("/parties/v1/parties/{party_id}/invitecode");
+        self.remote_call("glz", method, |s| format!("{}{path}", s.glz_url), None).await
+    }
+
+    async fn storefront(&self, puuid: &str) -> Result<Option<Value>> {
+        let path = format!("/store/v3/storefront/{puuid}");
+        let body = serde_json::json!({});
+        self.remote_call("pd", Method::POST, |s| format!("{}{path}", s.pd_url), Some(&body)).await
+    }
+
+    async fn wallet(&self, puuid: &str) -> Result<Option<Value>> {
+        self.pd(format!("/store/v1/wallet/{puuid}")).await
     }
 
     async fn content(&self) -> Result<Value> {
@@ -370,14 +420,20 @@ impl RiotSource for LiveSource {
         .ok_or_else(|| Error::Decode("content-service".into()))
     }
 
-    async fn watch_events(&self, wake: Arc<Notify>) {
+    async fn watch_events(&self, signals: Arc<LiveSignals>) {
         loop {
             // 再接続のたびにセッションを読み直す。Riot Client が再起動すると接続先が変わる。
-            if let Ok(session) = self.establish().await {
-                if let Err(error) = self.read_events(&session, &wake).await {
-                    tracing::warn!(error = %error, "WebSocket が切断");
+            match self.establish().await {
+                Ok(session) => {
+                    match self.read_events(&session, &signals).await {
+                        Ok(()) => tracing::warn!("WebSocket が閉じられました"),
+                        Err(error) => tracing::warn!(error = %error, "WebSocket が切断"),
+                    }
+                    self.events_connected.store(false, Ordering::Relaxed);
+                    // 待機中のエンジンを起こし、定期更新へ切り替えさせる。
+                    signals.wake.notify_one();
                 }
-                self.events_connected.store(false, Ordering::Relaxed);
+                Err(error) => tracing::debug!(%error, "WebSocket の接続を待っています"),
             }
             tokio::time::sleep(EVENT_RECONNECT).await;
         }
@@ -385,6 +441,10 @@ impl RiotSource for LiveSource {
 
     fn events_connected(&self) -> Option<bool> {
         Some(self.events_connected.load(Ordering::Relaxed))
+    }
+
+    fn events_received(&self) -> Option<u64> {
+        Some(self.events_received.load(Ordering::Relaxed))
     }
 
     async fn catalog(&self) -> Result<GameCatalog> {

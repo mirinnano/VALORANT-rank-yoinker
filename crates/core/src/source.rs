@@ -5,6 +5,7 @@ use crate::presence::Presence;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
@@ -16,6 +17,14 @@ pub struct GameCatalog {
     pub maps: HashMap<String, String>,
     /// 小文字の武器 UUID から表示名。
     pub weapons: HashMap<String, String>,
+}
+
+/// WebSocket からエンジンへ渡す合図。
+#[derive(Debug, Default)]
+pub struct LiveSignals {
+    pub wake: Notify,
+    pub party_changed: AtomicBool,
+    pub pregame_changed: AtomicBool,
 }
 
 #[async_trait]
@@ -34,13 +43,24 @@ pub trait RiotSource: Send + Sync {
     async fn mmr(&self, puuid: &str) -> Result<Option<Value>>;
     async fn competitive_updates(&self, puuid: &str) -> Result<Option<Value>>;
     /// 直近のコンペティティブの増減。自分のプロフィール用。
-    async fn rank_history(&self, puuid: &str, count: u32) -> Result<Option<Value>>;
+    async fn rank_history(&self, puuid: &str, start: u32, end: u32) -> Result<Option<Value>>;
     async fn match_details(&self, match_id: &str) -> Result<Option<Value>>;
+    async fn party_player(&self, puuid: &str) -> Result<Option<Value>>;
+    async fn party(&self, party_id: &str) -> Result<Option<Value>>;
+    /// パーティの招待コードを発行、または無効にする。更新後のパーティを返す。
+    async fn set_party_invite(&self, party_id: &str, enabled: bool) -> Result<Option<Value>>;
+    async fn storefront(&self, puuid: &str) -> Result<Option<Value>>;
+    async fn wallet(&self, puuid: &str) -> Result<Option<Value>>;
     async fn content(&self) -> Result<Value>;
     async fn catalog(&self) -> Result<GameCatalog>;
 
-    /// 状態の変化を受け取るたびに `wake` を起こす。対応しないデータ源では何もしない。
-    async fn watch_events(&self, _wake: Arc<Notify>) {}
+    /// 変化を受け取るたびに `signals` で知らせる。対応しないデータ源では何もしない。
+    async fn watch_events(&self, _signals: Arc<LiveSignals>) {}
+
+    /// WebSocket で受け取ったイベントの数。使わない実装は `None`。
+    fn events_received(&self) -> Option<u64> {
+        None
+    }
 
     /// イベントの受信が接続中か。対応しないデータ源では `None`。
     fn events_connected(&self) -> Option<bool> {

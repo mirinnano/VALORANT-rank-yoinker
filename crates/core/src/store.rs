@@ -5,6 +5,7 @@ use crate::model::{MatchSnapshot, PlayerView, Relation};
 use crate::analytics::{MatchMetrics, ObservedPick};
 use crate::model::PickPair;
 use crate::review::MatchReview;
+use crate::shop::SeenRecord;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,6 +36,13 @@ pub struct ReviewNote {
     pub round: Option<u32>,
     pub tags: Vec<String>,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WishItem {
+    pub item_id: String,
+    pub name: String,
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -83,6 +91,18 @@ CREATE TABLE IF NOT EXISTS observed_picks (
     PRIMARY KEY (match_id, team, agent)
 );
 CREATE INDEX IF NOT EXISTS observed_picks_map ON observed_picks (map, tier);
+CREATE TABLE IF NOT EXISTS shop_seen (
+    item_id TEXT NOT NULL,
+    rotation INTEGER NOT NULL,
+    seen_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (item_id, rotation)
+);
+CREATE TABLE IF NOT EXISTS wishlist (
+    item_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    image TEXT,
+    added_at_ms INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS review_notes (
     match_id TEXT NOT NULL,
     round INTEGER NOT NULL,
@@ -204,6 +224,48 @@ impl Store {
             }
         }
         Ok(found)
+    }
+
+    /// 今回のストアを記録し、今回を除いた過去の出現を返す。
+    pub fn record_shop(&mut self, ids: &[String], rotation: i64, now_ms: i64) -> Result<(HashMap<String, SeenRecord>, bool)> {
+        let tx = self.db.transaction()?;
+        let mut seen = HashMap::new();
+        let mut is_new = false;
+        for id in ids {
+            let (times, last_ms): (u32, Option<i64>) = tx.query_row(
+                "SELECT COUNT(*), MAX(seen_at_ms) FROM shop_seen WHERE item_id = ?1 AND rotation <> ?2",
+                params![id, rotation],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            seen.insert(id.clone(), SeenRecord { times, last_ms });
+            is_new |= tx.execute(
+                "INSERT OR IGNORE INTO shop_seen (item_id, rotation, seen_at_ms) VALUES (?1, ?2, ?3)",
+                params![id, rotation, now_ms],
+            )? > 0;
+        }
+        tx.commit()?;
+        Ok((seen, is_new))
+    }
+
+    pub fn wishlist(&self) -> Result<Vec<WishItem>> {
+        let mut query = self.db.prepare_cached("SELECT item_id, name, image FROM wishlist ORDER BY added_at_ms DESC")?;
+        let rows = query.query_map([], |row| {
+            Ok(WishItem { item_id: row.get(0)?, name: row.get(1)?, image: row.get(2)? })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn add_wish(&self, item: &WishItem, now_ms: i64) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO wishlist (item_id, name, image, added_at_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![item.item_id, item.name, item.image, now_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_wish(&self, item_id: &str) -> Result<()> {
+        self.db.execute("DELETE FROM wishlist WHERE item_id = ?1", [item_id])?;
+        Ok(())
     }
 
     /// 観測したピックを保存する。同じ試合を重ねて保存しても増えない。
@@ -416,6 +478,8 @@ mod tests {
             phase_remaining_ms: None,
             pick_board: None,
             finished_match: None,
+            lobby: None,
+            realtime: false,
         }
     }
 

@@ -31,6 +31,9 @@ pub struct Scenario {
     pub agents: HashMap<String, String>,
     pub maps: HashMap<String, String>,
     pub weapons: HashMap<String, String>,
+    pub party: Option<Value>,
+    pub storefront: Option<Value>,
+    pub wallet: Option<Value>,
 }
 
 pub struct ReplaySource {
@@ -40,6 +43,8 @@ pub struct ReplaySource {
     pregame_calls: AtomicUsize,
     coregame_calls: AtomicUsize,
     history_calls: AtomicUsize,
+    party_calls: AtomicUsize,
+    live: bool,
     mmr_gate: Option<Arc<Semaphore>>,
 }
 
@@ -52,6 +57,8 @@ impl ReplaySource {
             pregame_calls: AtomicUsize::new(0),
             coregame_calls: AtomicUsize::new(0),
             history_calls: AtomicUsize::new(0),
+            party_calls: AtomicUsize::new(0),
+            live: false,
             mmr_gate: None,
         }
     }
@@ -64,6 +71,16 @@ impl ReplaySource {
     pub fn with_mmr_gate(mut self, gate: Arc<Semaphore>) -> Self {
         self.mmr_gate = Some(gate);
         self
+    }
+
+    /// WebSocket に接続している状態として振る舞う。
+    pub fn with_live_events(mut self) -> Self {
+        self.live = true;
+        self
+    }
+
+    pub fn party_calls(&self) -> usize {
+        self.party_calls.load(Ordering::Relaxed)
     }
 
     pub fn history_calls(&self) -> usize {
@@ -131,12 +148,55 @@ impl RiotSource for ReplaySource {
         Ok(self.scenario.updates.get(puuid).cloned())
     }
 
-    async fn rank_history(&self, _puuid: &str, _count: u32) -> Result<Option<Value>> {
+    async fn rank_history(&self, _puuid: &str, start: u32, end: u32) -> Result<Option<Value>> {
         self.history_calls.fetch_add(1, Ordering::Relaxed);
         if self.scenario.fail_history {
             return Err(Error::Status { service: "pd", status: 503 });
         }
-        Ok(self.scenario.history.clone())
+        // 実物と同じように、指定された範囲だけを返す。
+        Ok(self.scenario.history.as_ref().map(|history| {
+            let matches: Vec<Value> = history
+                .get("Matches")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .skip(start as usize)
+                .take(end.saturating_sub(start) as usize)
+                .cloned()
+                .collect();
+            serde_json::json!({ "Matches": matches })
+        }))
+    }
+
+    fn events_connected(&self) -> Option<bool> {
+        self.live.then_some(true)
+    }
+
+    async fn party_player(&self, puuid: &str) -> Result<Option<Value>> {
+        let id = self.scenario.party.as_ref().and_then(|party| party.get("ID")).cloned();
+        Ok(id.map(|id| serde_json::json!({ "Subject": puuid, "CurrentPartyID": id })))
+    }
+
+    async fn party(&self, _party_id: &str) -> Result<Option<Value>> {
+        self.party_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(self.scenario.party.clone())
+    }
+
+    async fn set_party_invite(&self, _party_id: &str, enabled: bool) -> Result<Option<Value>> {
+        let code = if enabled { "DEMO42" } else { "" };
+        Ok(self.scenario.party.clone().map(|mut party| {
+            party["InviteCode"] = code.into();
+            party
+        }))
+    }
+
+    async fn storefront(&self, _puuid: &str) -> Result<Option<Value>> {
+        Ok(self.scenario.storefront.clone())
+    }
+
+    async fn wallet(&self, _puuid: &str) -> Result<Option<Value>> {
+        Ok(self.scenario.wallet.clone())
     }
 
     async fn match_details(&self, match_id: &str) -> Result<Option<Value>> {

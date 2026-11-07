@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <title>vRY Desktop</title>
+  <title>busters.gg</title>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wght@1,800;1,900&family=JetBrains+Mono:wght@400;600&family=Murecho:wght@400;600;800&display=swap">
   <link rel="stylesheet" href="tokens.css">
@@ -10,19 +10,22 @@
 </head>
 <body>
   <header data-tauri-drag-region>
-    <div class="brand" data-tauri-drag-region>vRY<i></i></div>
+    <div class="brand" data-tauri-drag-region>busters<i></i>gg</div>
     <div class="heading" data-tauri-drag-region>
       <h1 id="title">VALORANT を待っています</h1>
       <p id="subtitle" role="status"></p>
     </div>
     <nav aria-label="画面">
-      <button type="button" data-view="home" aria-pressed="true">ホーム</button>
+      <button type="button" data-view="lobby" aria-pressed="true">ロビー</button>
+      <button type="button" data-view="home" aria-pressed="false">ホーム</button>
       <button type="button" data-view="match" aria-pressed="false">対戦</button>
       <button type="button" data-view="review" aria-pressed="false">振り返り</button>
       <button type="button" data-view="stats" aria-pressed="false">統計</button>
+      <button type="button" data-view="shop" aria-pressed="false">ストア</button>
       <button type="button" data-view="history" aria-pressed="false">遭遇履歴</button>
       <button type="button" data-view="settings" aria-pressed="false">設定</button>
     </nav>
+    <span id="live-badge" class="live-badge" hidden></span>
     <div class="window-controls">
       <button id="window-minimize" type="button" aria-label="最小化">
         <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10"/></svg>
@@ -35,10 +38,12 @@
       </button>
     </div>
   </header>
-  <main id="home-view"></main>
+  <main id="lobby-view"></main>
+  <main id="home-view" hidden></main>
   <main id="match-view" hidden></main>
   <main id="review-view" hidden></main>
   <main id="stats-view" hidden></main>
+  <main id="shop-view" hidden></main>
   <main id="history-view" hidden></main>
   <main id="settings-view" hidden>
     <section class="settings" aria-labelledby="notify-title">
@@ -51,6 +56,36 @@
         </span>
       </label>
       <button id="test-alert" class="tag" type="button">音を試す</button>
+    </section>
+    <section class="settings" aria-labelledby="discord-title">
+      <h2 id="discord-title">Discord</h2>
+      <label class="setting">
+        <input id="discord-presence" type="checkbox">
+        <span>
+          <b>プレイ状況を Discord に表示する</b>
+          <small>マップ、モード、自分のエージェントがフレンドに見えます。</small>
+        </span>
+      </label>
+      <label class="setting">
+        <input id="discord-rank" type="checkbox">
+        <span><b>ランクと24時間のRRを出す</b></span>
+      </label>
+      <label class="setting">
+        <input id="discord-score" type="checkbox">
+        <span><b>試合のスコアを出す</b></span>
+      </label>
+      <label class="setting">
+        <input id="discord-party" type="checkbox">
+        <span><b>パーティの人数を出す</b></span>
+      </label>
+      <label class="setting">
+        <input id="discord-invite" type="checkbox">
+        <span>
+          <b>招待コードを出す</b>
+          <small>発行中のコードがフレンド全員に見えます。</small>
+        </span>
+      </label>
+      <p id="discord-status" class="settings-note" role="status"></p>
     </section>
     <section class="settings" aria-labelledby="diagnostics-title">
       <h2 id="diagnostics-title">Diagnostics</h2>
@@ -67,6 +102,8 @@
   </main>
   <script src="shared.js"></script>
   <script src="home.js"></script>
+  <script src="lobby.js"></script>
+  <script src="shop.js"></script>
   <script src="match.js"></script>
   <script src="pick.js"></script>
   <script src="review.js"></script>

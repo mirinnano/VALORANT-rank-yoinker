@@ -76,17 +76,42 @@ const KILL_TIME_FIELDS: [&str; 2] = [
     "roundResults.*.playerStats.*.kills.*.timeSinceRoundStartMillis",
     "roundResults.*.playerStats.*.kills.*.roundTime",
 ];
-const PRESENCE_FIELDS: [Field; 5] = [
+const PRESENCE_FIELDS: [Field; 8] = [
     ("sessionLoopState", Confirmed),
     ("queueId", Confirmed),
     ("partyId", Confirmed),
     ("partySize", Confirmed),
+    ("maxPartySize", Unconfirmed),
+    ("partyAccessibility", Unconfirmed),
+    ("isIdle", Unconfirmed),
     ("provisioningFlow", Confirmed),
 ];
 const LIVE_SCORE_FIELDS: [Field; 2] = [
     ("partyOwnerMatchScoreAllyTeam", Unconfirmed),
     ("partyOwnerMatchScoreEnemyTeam", Unconfirmed),
 ];
+const PARTY_FIELDS: [Field; 9] = [
+    ("Accessibility", Unconfirmed),
+    ("InviteCode", Unconfirmed),
+    ("Members.*.Subject", Unconfirmed),
+    ("Members.*.CompetitiveTier", Unconfirmed),
+    ("Members.*.IsReady", Unconfirmed),
+    ("Members.*.PlayerIdentity.PlayerCardID", Unconfirmed),
+    ("Members.*.PlayerIdentity.PlayerTitleID", Unconfirmed),
+    ("Members.*.PlayerIdentity.AccountLevel", Unconfirmed),
+    ("Members.*.PlayerIdentity.HideAccountLevel", Unconfirmed),
+];
+
+const STORE_FIELDS: [Field; 5] = [
+    ("SkinsPanelLayout.SingleItemOffersRemainingDurationInSeconds", Unconfirmed),
+    ("SkinsPanelLayout.SingleItemStoreOffers.*.Cost", Unconfirmed),
+    ("SkinsPanelLayout.SingleItemStoreOffers.*.Rewards.*.ItemID", Unconfirmed),
+    ("FeaturedBundle.Bundles.*.DataAssetID", Unconfirmed),
+    ("FeaturedBundle.Bundles.*.TotalDiscountedCost", Unconfirmed),
+];
+
+const WALLET_FIELDS: [Field; 1] = [("Balances", Unconfirmed)];
+
 const PREGAME_FIELDS: [Field; 6] = [
     ("PhaseTimeRemainingNS", Unconfirmed),
     ("ID", Confirmed),
@@ -129,7 +154,7 @@ pub struct Report {
 impl Report {
     /// 共有しやすい文章にする。項目名と結果だけを含む。
     pub fn to_text(&self) -> String {
-        let mut text = format!("vRY 診断 v{}\n", env!("CARGO_PKG_VERSION"));
+        let mut text = format!("busters.gg 診断 v{}\n", env!("CARGO_PKG_VERSION"));
         for check in &self.checks {
             let status = match check.status {
                 CheckStatus::Pass => "OK",
@@ -316,7 +341,22 @@ pub async fn run(source: &dyn RiotSource) -> Report {
         Err(error) => checks.push(failed("自分の名前", &error)),
     }
 
-    let history = source.rank_history(&own, HISTORY_MATCHES).await;
+    match source.party_player(&own).await {
+        Ok(player) => match player.as_ref().and_then(crate::party::current_party_id) {
+            Some(id) => {
+                let reply = source.party(&id).await;
+                checks.push(judge_reply("パーティ", &PARTY_FIELDS, &reply, "応答がありません"));
+            }
+            None => checks.push(skipped("パーティ", "パーティがありません")),
+        },
+        Err(error) => checks.push(failed("パーティ", &error)),
+    }
+    let storefront = source.storefront(&own).await;
+    checks.push(judge_reply("ストア", &STORE_FIELDS, &storefront, "応答がありません"));
+    let wallet = source.wallet(&own).await;
+    checks.push(judge_reply("ウォレット", &WALLET_FIELDS, &wallet, "応答がありません"));
+
+    let history = source.rank_history(&own, 0, HISTORY_MATCHES).await;
     let empty = matches!(&history, Ok(Some(value)) if crate::stats::latest_match(value).is_none());
     if empty {
         checks.push(skipped("RR の履歴", "コンペティティブの履歴がありません"));
@@ -349,7 +389,14 @@ pub async fn run(source: &dyn RiotSource) -> Report {
     }
 
     match source.events_connected() {
-        Some(true) => checks.push(check("WebSocket", CheckStatus::Pass, "状態の変化を受信しています")),
+        Some(true) => match source.events_received() {
+            Some(0) | None => checks.push(check(
+                "WebSocket",
+                CheckStatus::Warn,
+                "接続しましたが、イベントをまだ受信していません。状態を変えてもう一度実行してください",
+            )),
+            Some(count) => checks.push(check("WebSocket", CheckStatus::Pass, format!("{count} 件のイベントを受信しました"))),
+        },
         Some(false) => checks.push(check("WebSocket", CheckStatus::Warn, "未接続です。定期確認で動作します")),
         None => {}
     }
@@ -392,7 +439,7 @@ async fn capture(source: &dyn RiotSource) -> Result<Scenario> {
         }
     }
 
-    let history = source.rank_history(&own, HISTORY_MATCHES).await?;
+    let history = source.rank_history(&own, 0, HISTORY_MATCHES).await?;
     let ids: BTreeSet<String> = history
         .iter()
         .chain(updates.values())
@@ -426,6 +473,7 @@ async fn capture(source: &dyn RiotSource) -> Result<Scenario> {
         agents: catalog.agents,
         maps: catalog.maps,
         weapons: catalog.weapons,
+        ..Scenario::default()
     })
 }
 

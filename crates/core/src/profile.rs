@@ -22,6 +22,14 @@ pub struct RankPoint {
     pub afk_penalty: i32,
 }
 
+/// 推移や集計の対象にする試合数。
+pub const HISTORY_LIMIT: usize = 20;
+
+/// 履歴に載る試合か。振り分け中など tier のない試合は含めない。
+pub fn counts_in_history(entry: &Value) -> bool {
+    entry.get("TierAfterUpdate").and_then(Value::as_i64).is_some_and(|tier| tier > 0)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Profile {
     pub name: Option<String>,
@@ -37,13 +45,17 @@ pub struct Profile {
     pub history: Vec<RankPoint>,
     /// 保存済みの試合の集計。
     pub summary: Option<Summary>,
+    /// `history` のうち、試合詳細まで集計できた試合数。
+    pub detailed_games: u32,
 }
 
 fn point(value: &Value, catalog: &GameCatalog) -> Option<RankPoint> {
     let at_ms = value.get("MatchStartTime")?.as_i64()?;
     let int = |key| value.get(key).and_then(Value::as_i64).unwrap_or(0);
-    // 振り分け中など tier のない試合は推移に含めない。
-    let tier = u32::try_from(int("TierAfterUpdate")).ok().filter(|tier| *tier > 0)?;
+    if !counts_in_history(value) {
+        return None;
+    }
+    let tier = int("TierAfterUpdate") as u32;
     let map = value
         .get("MapID")
         .and_then(Value::as_str)
@@ -79,6 +91,8 @@ pub fn build(
         .map(|matches| matches.iter().filter_map(|m| point(m, catalog)).collect())
         .unwrap_or_default();
     points.sort_by_key(|point| point.at_ms);
+    let overflow = points.len().saturating_sub(HISTORY_LIMIT);
+    points.drain(..overflow);
 
     let recent = || points.iter().filter(|point| now_ms - point.at_ms < DAY_MS);
     let (last_day_rr, last_day_games) = (recent().map(|p| p.earned).sum(), recent().count() as u32);
@@ -94,6 +108,7 @@ pub fn build(
         last_day_games,
         history: points,
         summary: None,
+        detailed_games: 0,
     }
 }
 

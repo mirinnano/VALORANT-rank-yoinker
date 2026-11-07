@@ -39,6 +39,48 @@ pub struct RankView {
     pub leaderboard: u32,
 }
 
+/// ロビーでの進行状況。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LobbyPhase {
+    Ready,
+    Queueing,
+    MatchFound,
+    Custom,
+}
+
+/// パーティの1人分。puuid は渡さない。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PartyMember {
+    pub is_own: bool,
+    pub name: Option<String>,
+    pub rank: Option<RankView>,
+    /// 縦長のバナー。
+    pub card_large: Option<String>,
+    /// 横長のバナー。
+    pub card_wide: Option<String>,
+    pub title_id: Option<String>,
+    pub level: Option<u32>,
+    pub owner: bool,
+    pub ready: bool,
+}
+
+/// メニュー画面にいるときの、自分のパーティの状態。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Lobby {
+    pub phase: LobbyPhase,
+    pub party_size: u32,
+    /// 取得できないときは 0。
+    pub max_party_size: u32,
+    pub open: bool,
+    pub idle: bool,
+    /// キューに入った時刻。このアプリが検知した時点を使う。
+    pub queue_started_ms: Option<i64>,
+    /// 自分が先頭。パーティ API が使えないときは、プレゼンスに載る人だけになる。
+    pub party: Vec<PartyMember>,
+    pub invite_code: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PlayerView {
     /// 内部の照合用。UI へは渡さない。
@@ -102,6 +144,10 @@ pub struct MatchSnapshot {
     pub pick_board: Option<PickBoard>,
     /// 直近に終わった試合。振り返りの対象。
     pub finished_match: Option<String>,
+    /// メニュー画面でのみ入る。
+    pub lobby: Option<Lobby>,
+    /// WebSocket のイベントで更新できている。
+    pub realtime: bool,
 }
 
 impl MatchSnapshot {
@@ -119,6 +165,8 @@ impl MatchSnapshot {
             phase_remaining_ms: None,
             pick_board: None,
             finished_match: None,
+            lobby: None,
+            realtime: false,
         }
     }
 }

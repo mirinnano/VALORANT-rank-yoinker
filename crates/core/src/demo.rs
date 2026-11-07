@@ -7,6 +7,14 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const OWN: &str = "demo-own";
+
+fn party_member(subject: &str, tier: u32, card: &str, owner: bool) -> Value {
+    json!({
+        "Subject": subject, "CompetitiveTier": tier, "IsOwner": owner, "IsReady": true,
+        "PlayerIdentity": {"PlayerCardID": card, "PlayerTitleID": "", "AccountLevel": 120,
+            "HideAccountLevel": false}
+    })
+}
 const AGENTS: [(&str, &str); 10] = [
     ("agent-jett", "Jett"), ("agent-sage", "Sage"), ("agent-omen", "Omen"),
     ("agent-sova", "Sova"), ("agent-reyna", "Reyna"), ("agent-killjoy", "Killjoy"),
@@ -58,15 +66,17 @@ fn presence(d: &Demo, state: &str, nested: bool, score: (u32, u32)) -> Value {
             "matchPresenceData": {"sessionLoopState": state, "queueId": "competitive",
                 "provisioningFlow": "Matchmaking",
                 "partyOwnerMatchScoreAllyTeam": ally, "partyOwnerMatchScoreEnemyTeam": enemy},
-            "partyPresenceData": {"partyId": d.party, "partySize": d.party_size, "partyState": "DEFAULT"},
-            "playerPresenceData": {"accountLevel": d.level},
+            "partyPresenceData": {"partyId": d.party, "partySize": d.party_size, "maxPartySize": 5,
+                "partyAccessibility": "CLOSED", "partyState": "DEFAULT"},
+            "playerPresenceData": {"accountLevel": d.level, "isIdle": false},
             "isValid": true
         })
     } else {
         json!({
             "sessionLoopState": state, "queueId": "competitive", "partyId": d.party,
             "provisioningFlow": "Matchmaking",
-            "partySize": d.party_size, "accountLevel": d.level, "isValid": true,
+            "partySize": d.party_size, "maxPartySize": 5, "partyAccessibility": "CLOSED",
+            "partyState": "DEFAULT", "isIdle": false, "accountLevel": d.level, "isValid": true,
             "partyOwnerMatchScoreAllyTeam": ally, "partyOwnerMatchScoreEnemyTeam": enemy
         })
     };
@@ -261,6 +271,28 @@ pub fn scenario() -> Scenario {
         updates,
         history: Some(rank_history()),
         fail_history: false,
+        party: Some(json!({
+            "ID": "party-a", "Accessibility": "CLOSED", "InviteCode": "",
+            "Members": [
+                party_member("demo-friend", 14, "33c1f011-4eca-068c-9751-f68c788b2eee", true),
+                party_member(OWN, 15, "9fb348bc-41a0-91ad-8a3e-818035c4e561", false),
+            ]
+        })),
+        storefront: Some(json!({
+            "FeaturedBundle": {"Bundles": [{
+                "DataAssetID": "3941ad01-4e3b-46e0-ba3a-ab94f7c67f98", "Items": [{}, {}, {}],
+                "TotalDiscountedCost": {"85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741": 5350},
+                "DurationRemainingInSeconds": 200_000
+            }]},
+            "SkinsPanelLayout": {
+                "SingleItemOffersRemainingDurationInSeconds": 40_000,
+                "SingleItemStoreOffers": [{
+                    "Cost": {"85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741": 875},
+                    "Rewards": [{"ItemID": "bad7ae62-4f6a-8974-ab73-7ba6405ca898"}]
+                }]
+            }
+        })),
+        wallet: Some(json!({"Balances": {"85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741": 1450}})),
         matches: std::iter::once(("demo-match".to_owned(), review_details(0)))
             .chain((0..20).map(|i| (format!("history-{i}"), review_details(i))))
             .collect(),

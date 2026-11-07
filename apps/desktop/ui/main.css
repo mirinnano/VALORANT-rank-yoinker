@@ -81,6 +81,88 @@ main[hidden] { display: none !important; }
 }
 .score-value { display: inline-block; color: var(--paper); font-weight: 600; }
 
+/* ロビー: 今の状態を一語で見せ、その下に5人の枠を並べる */
+.lobby-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 0 24px; padding: 20px 24px; border-bottom: 1px solid var(--line); }
+.lobby-hero .label { grid-column: 1 / -1; margin: 0 0 8px; color: var(--paper); }
+.lobby-hero .label b { color: var(--red); }
+.lobby-status { margin: 0; font-size: clamp(56px, 8vw, 112px); line-height: 0.95; }
+.lobby-hero.is-match_found .lobby-status { color: var(--yellow); }
+.lobby-clock { margin: 0; font-family: var(--display); font-size: clamp(40px, 5vw, 72px); font-style: italic; font-weight: 900; }
+.lobby-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px 24px; padding: 16px 24px 24px; }
+.lobby-body h2 { margin: 0 0 8px; color: var(--mute); font-family: var(--mono); font-size: 12px; font-weight: 400; }
+.party-banners { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.party-banner { position: relative; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; height: clamp(420px, 66vh, 680px); overflow: hidden; background: var(--ink-2); }
+.party-banner.is-own { outline: 2px solid var(--paper); outline-offset: -2px; }
+.banner-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center top; }
+.banner-plate { position: relative; display: grid; gap: 2px; padding: 56px 14px 14px; background: linear-gradient(0deg, var(--ink) 40%, transparent); }
+.banner-plate small, .party-banner.is-unknown small { color: var(--paper); font-family: var(--mono); font-size: 12px; }
+.party-name { font-family: var(--display); font-size: 22px; font-style: italic; font-weight: 900; overflow-wrap: anywhere; }
+.party-title { color: var(--mute); font-size: 13px; }
+.party-rank { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 14px; }
+.party-rank .rank-icon { width: 28px; height: 28px; }
+.party-banner.is-unknown { padding: 14px; }
+.party-banner.is-empty {
+  align-items: center;
+  justify-content: center;
+  background-image: radial-gradient(var(--ink-3) 30%, transparent 32%);
+  background-size: var(--dot-size) var(--dot-size);
+}
+.banner-invite { padding: 8px 18px; border: 1px solid var(--line); background: var(--ink); color: var(--paper); font: inherit; font-weight: 700; cursor: pointer; transition: border-color var(--motion-fast) ease; }
+.invite { display: grid; gap: 8px; justify-items: stretch; }
+.invite h2 { margin-bottom: 0; }
+.invite-code { margin: 0; font-family: var(--mono); font-size: 34px; font-weight: 700; letter-spacing: 0.06em; overflow-wrap: anywhere; user-select: all; }
+.invite-message { margin: 0; padding: 8px; background: var(--ink-2); font-size: 12px; line-height: 1.6; white-space: pre-line; overflow-wrap: anywhere; user-select: text; }
+.live-badge { margin-left: auto; margin-right: 12px; color: var(--mute); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.live-badge.is-live { color: var(--paper); }
+
+.lobby-side { display: grid; align-content: start; gap: 20px; }
+.lobby-block .hero-figures { margin-top: 0; }
+.lobby-note { margin: 0; color: var(--mute); font-size: 13px; line-height: 1.7; }
+.lobby-next { margin: 0 0 8px; font-family: var(--display); font-size: 24px; font-style: italic; font-weight: 900; }
+.ladder { height: 6px; background: var(--ink-3); }
+.ladder i { display: block; height: 100%; background: var(--red); transform-origin: left; }
+.lobby-last { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 2px 12px; width: 100%; padding: 8px; border: 1px solid var(--line); background: transparent; color: var(--paper); font: inherit; text-align: left; cursor: pointer; transition: border-color var(--motion-fast) ease; }
+.lobby-last img { grid-row: 1 / 3; width: 88px; height: 48px; object-fit: cover; }
+.lobby-last small { grid-column: 2 / -1; color: var(--mute); font-size: 12px; }
+.lobby-last:disabled { cursor: default; }
+@media (hover: hover) and (pointer: fine) {
+  .lobby-last:not(:disabled):hover, .banner-invite:hover, .wish:hover { border-color: var(--paper); }
+}
+
+/* ストア: 手持ちと今日の4枠を先に見せ、欲しい物は右に常に置く */
+.shop-hero { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 40px; padding: 20px 24px; border-bottom: 1px solid var(--line); }
+.shop-hero .hero-figures { margin: 0; }
+.shop-title { margin: 0; font-size: clamp(56px, 8vw, 112px); line-height: 0.95; }
+.shop-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px 24px; padding: 16px 24px 24px; }
+.shop-section { margin-bottom: 24px; }
+.shop-head { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+.shop-head h2 { margin: 0; color: var(--paper); font-size: 15px; }
+.shop-clock { color: var(--mute); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.skin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+.skin-card { display: grid; align-content: start; gap: 4px; padding: 12px; border-top: 3px solid var(--tier, var(--line)); background: var(--ink-2); }
+.skin-card.is-wished { outline: 2px solid var(--yellow); outline-offset: -2px; }
+.skin-image { width: 100%; height: 110px; margin-bottom: 8px; object-fit: contain; }
+.skin-card h3 { margin: 0; font-size: 15px; }
+.skin-price { margin: 0; font-family: var(--display); font-size: 20px; font-style: italic; font-weight: 900; }
+.skin-price s { color: var(--mute); font-size: 14px; font-weight: 400; }
+.skin-price b { color: var(--yellow); font-size: 14px; }
+.skin-card small { color: var(--mute); font-size: 12px; line-height: 1.5; }
+.wish { justify-self: start; margin-top: 4px; padding: 4px 8px; border: 1px solid var(--line); background: transparent; color: var(--paper); font: inherit; font-size: 12px; cursor: pointer; transition: border-color var(--motion-fast) ease; }
+.wish[aria-pressed="true"] { border-color: var(--yellow); color: var(--yellow); }
+.bundle-card { min-height: 200px; padding: 16px; display: flex; flex-direction: column; justify-content: flex-end; margin-bottom: 8px; }
+.bundle-name { margin: 0; font-size: 40px; }
+.bundle-line { margin: 4px 0 0; font-family: var(--mono); font-size: 13px; }
+.bundle-card .shop-clock { color: var(--paper); }
+.wish-search { width: 100%; padding: 8px; border: 1px solid var(--line); background: var(--ink-2); color: var(--paper); font: inherit; }
+.wish-results { display: grid; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.wish-results li { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 4px 8px; align-items: center; font-size: 13px; }
+.wish-results li .wish { grid-column: 2; margin: 0; }
+.wish-image { width: 64px; height: 28px; object-fit: contain; }
+@media (max-width: 1240px) {
+  .lobby-body, .shop-body { grid-template-columns: minmax(0, 1fr); }
+  .party-banner { height: 420px; }
+}
+
 /* 対戦: マップの網点に軸を載せ、下に表と詳細 */
 #match-view:not([hidden]) {
   display: grid;

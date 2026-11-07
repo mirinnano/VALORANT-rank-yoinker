@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "vRY Desktop",
+  "productName": "busters.gg",
   "version": "0.1.0",
   "identifier": "com.mirinnano.vry-desktop",
   "build": {
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "vRY Desktop",
+        "title": "busters.gg",
         "url": "index.html",
         "width": 1440,
         "height": 920,
@@ -33,6 +33,28 @@
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "mirinnano",
+    "copyright": "Copyright (c) 2021-2023 Zay Kenyon and Contributors",
+    "shortDescription": "VALORANT のロビー、対戦、振り返り、ストアをまとめるデスクトップアプリ",
+    "licenseFile": "../../../LICENSE",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "installMode": "currentUser",
+        "languages": [
+          "Japanese",
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "startMenuFolder": "busters.gg"
+      }
+    }
   }
 }

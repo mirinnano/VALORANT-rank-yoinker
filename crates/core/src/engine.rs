@@ -3,27 +3,40 @@
 use crate::analytics;
 use crate::content::Seasons;
 use crate::error::{Error, Result};
-use crate::model::{AppEvent, GameState, MatchSnapshot, PickBoard, PickStat};
+use crate::model::{AppEvent, GameState, Lobby, LobbyPhase, MatchSnapshot, PartyMember, PickBoard, PickStat};
+use crate::party::{self, PartyInfo, RawMember};
 use crate::presence::{self, Presence, PrivatePresence};
 use crate::profile::{self, Profile};
 use crate::rank;
 use crate::roster::{self, BuildContext, PlayerExtra, RawMatch};
-use crate::source::{GameCatalog, RiotSource};
+use crate::source::{GameCatalog, LiveSignals, RiotSource};
 use crate::stats;
 use crate::store::Store;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{watch, Notify, OnceCell};
+use tokio::sync::{watch, OnceCell};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 const TICK: Duration = Duration::from_secs(3);
 const RECONNECT: Duration = Duration::from_secs(5);
+/// WebSocket が動いている間は、イベントで起きる。これは取りこぼしに備えた保険。
+pub const EVENT_WATCHDOG: Duration = Duration::from_secs(60);
+/// 続けて届くイベントをまとめる時間。連続したピックで API を連打しない。
+const EVENT_SETTLE: Duration = Duration::from_millis(250);
 /// エージェント選択は変化を拾うため、数ティックごとに取り直す。
 const PREGAME_REFRESH_TICKS: u32 = 2;
-const HISTORY_MATCHES: u32 = 20;
+/// 履歴を 1 回に取得する件数。
+const HISTORY_PAGE: u32 = 20;
+/// 振り分けの試合を読み飛ばしても足りないときに、さかのぼるページ数。
+const HISTORY_MAX_PAGES: u32 = 3;
+/// 試合詳細の取得を諦めるまでの失敗回数。次の試合の集計を止めないために打ち切る。
+const METRIC_MAX_FAILURES: u32 = 3;
+/// 変化がなくても、招待コードなどを読み直す間隔。
+const PARTY_REFRESH_TICKS: u32 = 5;
 /// ピックの観測に含める、チーム平均からのランクの幅。1 ランクは 3 段。
 const PICK_TIER_RANGE: u32 = 3;
 const PICK_MIN_MATCHES: u32 = 5;
@@ -31,6 +44,10 @@ const PICK_MIN_MATCHES: u32 = 5;
 const INCOMPLETE_RETRY_TICKS: u32 = 10;
 /// プロフィールの取得に失敗したら、このティック数だけ待って取り直す。
 const PROFILE_RETRY_TICKS: u32 = 10;
+/// 試合の結果は Riot 側に反映されるまで時間がかかるので、この間隔で確かめる。
+const RESULT_RETRY_TICKS: u32 = 10;
+/// 反映を待つ回数の上限。30 秒間隔でおよそ 5 分。
+const RESULT_MAX_CHECKS: u32 = 10;
 
 pub fn mode_name(queue: Option<&str>) -> Option<String> {
     let name = match queue? {
@@ -52,6 +69,24 @@ pub fn mode_name(queue: Option<&str>) -> Option<String> {
         other => other,
     };
     Some(name.to_owned())
+}
+
+/// 履歴に載る試合が上限に届くまで、ページをさかのぼって集める。
+async fn fetch_history(source: &dyn RiotSource, puuid: &str) -> Result<Option<Value>> {
+    let mut matches: Vec<Value> = Vec::new();
+    for page in 0..HISTORY_MAX_PAGES {
+        let start = page * HISTORY_PAGE;
+        let Some(value) = source.rank_history(puuid, start, start + HISTORY_PAGE).await? else {
+            break;
+        };
+        let entries = value.get("Matches").and_then(Value::as_array).cloned().unwrap_or_default();
+        let full_page = entries.len() as u32 >= HISTORY_PAGE;
+        matches.extend(entries);
+        if !full_page || matches.iter().filter(|m| profile::counts_in_history(m)).count() >= profile::HISTORY_LIMIT {
+            break;
+        }
+    }
+    Ok(Some(serde_json::json!({ "Matches": matches })))
 }
 
 fn snapshot_mode(own: &PrivatePresence) -> Option<String> {
@@ -159,6 +194,21 @@ pub struct Engine {
     was_in_match: bool,
     playing_match: Option<String>,
     finished_match: Option<String>,
+    /// 終わった試合のうち、まだ履歴に載っていないもの。
+    awaiting_result: Option<String>,
+    result_checks: u32,
+    result_wait: u32,
+    queue_started_ms: Option<i64>,
+    party_info: Option<PartyInfo>,
+    party_signature: Option<(Option<String>, u32, Option<String>, bool)>,
+    party_ticks: u32,
+    /// メンバーが変わったときだけ取得するための控え。
+    party_names: HashMap<String, Option<String>>,
+    metric_failures: HashMap<String, u32>,
+    metrics_pending: bool,
+    /// このエージェント選択でピックの通知を受け取った。
+    pregame_pushed: bool,
+    signals: Arc<LiveSignals>,
     progress: Option<watch::Sender<AppEvent>>,
 }
 
@@ -185,8 +235,25 @@ impl Engine {
             was_in_match: false,
             playing_match: None,
             finished_match: None,
+            awaiting_result: None,
+            result_checks: 0,
+            result_wait: 0,
+            queue_started_ms: None,
+            party_info: None,
+            party_signature: None,
+            party_ticks: 0,
+            party_names: HashMap::new(),
+            metric_failures: HashMap::new(),
+            metrics_pending: false,
+            pregame_pushed: false,
+            signals: Arc::new(LiveSignals::default()),
             progress: None,
         }
+    }
+
+    /// WebSocket からの合図の受け口。
+    pub fn signals(&self) -> Arc<LiveSignals> {
+        self.signals.clone()
     }
 
     /// 取得の途中経過を流す先を設定する。
@@ -199,6 +266,7 @@ impl Engine {
         if let Some(events) = &self.progress {
             snapshot.profile = self.profile.clone();
             snapshot.finished_match = self.finished_match.clone();
+            snapshot.realtime = self.is_realtime();
             events.send_replace(AppEvent::Snapshot(snapshot));
         }
     }
@@ -226,6 +294,7 @@ impl Engine {
         self.active_match = None;
         self.current = None;
         self.pregame_ticks = 0;
+        self.pregame_pushed = false;
     }
 
     /// 接続を破棄する。次の [`Engine::step`] で接続し直す。
@@ -233,6 +302,9 @@ impl Engine {
         self.connection = None;
         self.profile = None;
         self.profile_wait = 0;
+        self.party_info = None;
+        self.party_signature = None;
+        self.party_names.clear();
         self.reset_match();
     }
 
@@ -243,6 +315,7 @@ impl Engine {
         let mut snapshot = self.update_match().await?;
         if let Some(puuid) = self.connection.as_ref().map(|c| c.puuid.clone()) {
             // プロフィールの取得を待たず、先に現在の状態を見せる。
+            self.check_result(snapshot.state);
             if self.profile.is_none() {
                 self.publish(snapshot.clone());
             }
@@ -253,7 +326,27 @@ impl Engine {
             snapshot.profile = self.profile.clone();
         }
         snapshot.finished_match = self.finished_match.clone();
+        snapshot.realtime = self.is_realtime();
         Ok(snapshot)
+    }
+
+    fn is_realtime(&self) -> bool {
+        self.source.events_connected() == Some(true)
+    }
+
+    /// イベントを待つ上限。WebSocket が切れているか、イベントで終わらない処理が残っている間だけ短くする。
+    pub fn idle_delay(&self, state: GameState) -> Duration {
+        let unfinished = self.metrics_pending
+            || self.awaiting_result.is_some()
+            || self.profile.is_none()
+            || !self.incomplete.is_empty();
+        // ピックの通知が届くと分かるまでは、取得して追いかける。
+        let awaiting_pick_events = state == GameState::Pregame && !self.pregame_pushed;
+        if self.is_realtime() && !unfinished && !awaiting_pick_events {
+            EVENT_WATCHDOG
+        } else {
+            TICK
+        }
     }
 
     async fn update_match(&mut self) -> Result<MatchSnapshot> {
@@ -272,14 +365,24 @@ impl Engine {
                     self.profile = None;
                     self.was_in_match = false;
                     self.profile_wait = 0;
-                    self.finished_match = self.playing_match.take().or(self.finished_match.take());
+                    let played = self.playing_match.take();
+                    if played.is_some() {
+                        self.awaiting_result = played.clone();
+                        self.result_checks = 0;
+                        self.result_wait = RESULT_RETRY_TICKS;
+                    }
+                    self.finished_match = played.or(self.finished_match.take());
                 }
-                return Ok(MatchSnapshot::empty(state, mode));
+                let mut snapshot = MatchSnapshot::empty(state, mode);
+                snapshot.lobby = Some(self.lobby(&own, &presences, &puuid).await);
+                return Ok(snapshot);
             }
             GameState::Pregame => {
+                let pushed = self.signals.pregame_changed.swap(false, Ordering::Relaxed);
+                self.pregame_pushed |= pushed;
                 if let Some(snapshot) = self.reusable(state) {
                     self.pregame_ticks += 1;
-                    if self.pregame_ticks % PREGAME_REFRESH_TICKS != 0 {
+                    if !pushed && self.pregame_ticks % PREGAME_REFRESH_TICKS != 0 {
                         return Ok(snapshot);
                     }
                 }
@@ -323,6 +426,138 @@ impl Engine {
         Ok(snapshot)
     }
 
+    /// パーティの内容を取り直す。人数や状態が変わったときと、一定の間隔ごとに読む。
+    async fn refresh_party(&mut self, own: &PrivatePresence, puuid: &str) {
+        let signature = (own.party_id.clone(), own.party_size, own.party_state.clone(), own.party_open);
+        self.party_ticks += 1;
+        let pushed = self.signals.party_changed.swap(false, Ordering::Relaxed);
+        let changed = pushed || self.party_signature.as_ref() != Some(&signature);
+        if !changed && self.party_ticks < PARTY_REFRESH_TICKS {
+            return;
+        }
+        self.party_signature = Some(signature);
+        self.party_ticks = 0;
+        let id = match own.party_id.clone() {
+            Some(id) => Ok(Some(id)),
+            None => self
+                .source
+                .party_player(puuid)
+                .await
+                .map(|player| player.as_ref().and_then(party::current_party_id)),
+        };
+        let reply = match id {
+            Ok(Some(id)) => self.source.party(&id).await,
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        };
+        self.party_info = match reply {
+            Ok(value) => value.as_ref().and_then(party::parse),
+            Err(error) => {
+                tracing::warn!(%error, "パーティの取得に失敗");
+                None
+            }
+        };
+    }
+
+    /// 名前は新しいメンバーの分だけ取得する。パーティ API が使えなければプレゼンスの範囲で出す。
+    async fn party(&mut self, own: &PrivatePresence, presences: &[Presence], puuid: &str) -> Vec<PartyMember> {
+        self.refresh_party(own, puuid).await;
+        let mut raw: Vec<RawMember> = match &self.party_info {
+            Some(info) if !info.members.is_empty() => info.members.clone(),
+            _ => presence::party_members(presences, puuid)
+                .into_iter()
+                .map(|id| RawMember { puuid: id, card: None, title: None, level: None, tier: 0, owner: false, ready: false })
+                .collect(),
+        };
+        // 自分を先頭に、次にオーナーを並べる。
+        raw.sort_by_key(|member| (member.puuid != puuid, !member.owner));
+
+        self.party_names.retain(|id, _| raw.iter().any(|member| &member.puuid == id));
+        let missing: Vec<String> = raw
+            .iter()
+            .filter(|member| !self.party_names.contains_key(&member.puuid))
+            .map(|member| member.puuid.clone())
+            .collect();
+        if !missing.is_empty() {
+            let names = self.source.names(&missing).await.unwrap_or_default();
+            for id in missing {
+                let name = names.get(&id).cloned();
+                self.party_names.insert(id, name);
+            }
+        }
+        raw.into_iter()
+            .map(|member| {
+                let name = self.party_names.get(&member.puuid).cloned().flatten();
+                PartyMember {
+                    is_own: member.puuid == puuid,
+                    name,
+                    rank: (member.tier > 0 || self.party_info.is_some()).then(|| rank::view(member.tier, 0, 0)),
+                    card_large: member.card.as_deref().map(|card| party::card_url(card, "largeart")),
+                    card_wide: member.card.as_deref().map(|card| party::card_url(card, "wideart")),
+                    title_id: member.title,
+                    level: member.level,
+                    owner: member.owner,
+                    ready: member.ready,
+                }
+            })
+            .collect()
+    }
+
+    async fn lobby(&mut self, own: &PrivatePresence, presences: &[Presence], puuid: &str) -> Lobby {
+        let party = self.party(own, presences, puuid).await;
+        let info = self.party_info.as_ref();
+        let phase = own.lobby_phase();
+        match phase {
+            LobbyPhase::Queueing => {
+                self.queue_started_ms.get_or_insert_with(system_now_ms);
+            }
+            LobbyPhase::MatchFound => {}
+            LobbyPhase::Ready | LobbyPhase::Custom => self.queue_started_ms = None,
+        }
+        Lobby {
+            phase,
+            party_size: own.party_size.max(party.len() as u32).max(1),
+            max_party_size: own.max_party_size,
+            open: info.map_or(own.party_open, |info| info.open),
+            invite_code: info.and_then(|info| info.invite_code.clone()),
+            idle: own.idle,
+            queue_started_ms: self.queue_started_ms,
+            party,
+        }
+    }
+
+    /// 終わった試合が履歴に載るまで、プロフィールを間隔を空けて取り直す。
+    fn check_result(&mut self, state: GameState) {
+        if state != GameState::Menus {
+            self.awaiting_result = None;
+            self.queue_started_ms = None;
+            return;
+        }
+        let Some(id) = self.awaiting_result.as_deref() else { return };
+        let Some(profile) = &self.profile else { return };
+        if profile.history.iter().any(|point| point.match_id.as_deref() == Some(id)) {
+            self.awaiting_result = None;
+            // 集計前に「試合なし」と判定した試合も、ここで取り直せるようにする。
+            self.skipped_metrics.clear();
+            self.metric_failures.clear();
+            return;
+        }
+        if self.result_wait > 0 {
+            self.result_wait -= 1;
+            return;
+        }
+        if self.result_checks >= RESULT_MAX_CHECKS {
+            // 履歴の対象外のモードでは、いつまでも載らない。
+            self.awaiting_result = None;
+            return;
+        }
+        self.result_checks += 1;
+        self.result_wait = RESULT_RETRY_TICKS;
+        self.skipped_metrics.clear();
+        self.metric_failures.clear();
+        self.profile = None;
+    }
+
     /// プロフィールを返す。失敗しても試合の表示は止めない。
     async fn load_profile(&mut self, puuid: &str) -> Option<Profile> {
         if self.profile.is_some() {
@@ -337,7 +572,7 @@ impl Engine {
         let own = [puuid.to_owned()];
         let (mmr, history, names) = tokio::join!(
             self.source.mmr(puuid),
-            self.source.rank_history(puuid, HISTORY_MATCHES),
+            fetch_history(self.source.as_ref(), puuid),
             self.source.names(&own),
         );
         let (mmr, history) = match (mmr, history) {
@@ -442,15 +677,22 @@ impl Engine {
             .iter()
             .find(|id| !self.skipped_metrics.contains(*id) && !store.has_metrics(id).unwrap_or(true))
             .cloned();
+        self.metrics_pending = missing.is_some();
 
         if let Some(id) = missing {
             match self.source.match_details(&id).await {
                 Ok(Some(details)) => {
                     let connection = self.connection.as_ref().expect("connected before sync");
                     let metrics = analytics::player_metrics(puuid, &id, &details, &connection.catalog);
-                    if let (Some(metrics), Some(store)) = (metrics, &self.store) {
-                        if let Err(error) = store.save_metrics(&metrics) {
-                            tracing::warn!(%error, "指標の保存に失敗");
+                    match (metrics, &self.store) {
+                        (Some(metrics), Some(store)) => {
+                            if let Err(error) = store.save_metrics(&metrics) {
+                                tracing::warn!(%error, "指標の保存に失敗");
+                            }
+                        }
+                        // 自分の行がない試合は、取り直しても結果が変わらない。
+                        _ => {
+                            self.skipped_metrics.insert(id.clone());
                         }
                     }
                     self.save_picks(&id, &details);
@@ -458,7 +700,14 @@ impl Engine {
                 Ok(None) => {
                     self.skipped_metrics.insert(id);
                 }
-                Err(error) => tracing::warn!(%error, "試合詳細の取得に失敗"),
+                Err(error) => {
+                    tracing::warn!(%error, "試合詳細の取得に失敗");
+                    let failures = self.metric_failures.entry(id.clone()).or_default();
+                    *failures += 1;
+                    if *failures >= METRIC_MAX_FAILURES {
+                        self.skipped_metrics.insert(id);
+                    }
+                }
             }
         }
 
@@ -467,6 +716,7 @@ impl Engine {
             Ok(games) if !games.is_empty() => {
                 if let Some(profile) = &mut self.profile {
                     profile.summary = Some(analytics::summarize(&games));
+                    profile.detailed_games = games.len() as u32;
                 }
             }
             Ok(_) => {}
@@ -584,12 +834,12 @@ impl Engine {
         self.progress = Some(events.clone());
         let mut last_state = None;
 
-        // 状態の変化はすぐ受け取り、切断に備えて定期確認も続ける。
-        let wake = Arc::new(Notify::new());
+        // 変化はイベントですぐ受け取り、切断に備えて定期確認も続ける。
+        let signals = self.signals.clone();
         tokio::spawn({
             let source = self.source.clone();
-            let wake = wake.clone();
-            async move { source.watch_events(wake).await }
+            let signals = signals.clone();
+            async move { source.watch_events(signals).await }
         });
         loop {
             let delay = match self.step().await {
@@ -598,8 +848,9 @@ impl Engine {
                         tracing::info!(state = ?snapshot.state, players = snapshot.players.len(), "状態が変化");
                         last_state = Some(snapshot.state);
                     }
+                    let delay = self.idle_delay(snapshot.state);
                     events.send_replace(AppEvent::Snapshot(snapshot));
-                    TICK
+                    delay
                 }
                 Err(error) => {
                     tracing::warn!(%error, "更新に失敗、再接続します");
@@ -615,7 +866,7 @@ impl Engine {
             };
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
-                () = wake.notified() => tracing::info!("状態の変化を受信"),
+                () = signals.wake.notified() => tokio::time::sleep(EVENT_SETTLE).await,
             }
         }
     }

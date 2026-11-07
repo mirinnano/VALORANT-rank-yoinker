@@ -272,3 +272,192 @@ async fn empty_timeline_reports_not_ready() {
     let (mut engine, _) = engine(scenario);
     assert!(matches!(engine.step().await, Err(vry_core::error::Error::ClientNotReady)));
 }
+
+#[tokio::test]
+async fn menus_carry_the_party_state() {
+    let mut engine = Engine::new(Arc::new(ReplaySource::new(demo::scenario())), None);
+    let menus = advance(&mut engine, MENUS).await;
+    let lobby = menus.lobby.expect("lobby in menus");
+    assert_eq!(lobby.phase, vry_core::model::LobbyPhase::Ready);
+    assert_eq!(lobby.max_party_size, 5);
+    assert!(lobby.party_size >= 1);
+    assert_eq!(advance(&mut engine, PREGAME).await.lobby, None);
+}
+
+#[tokio::test]
+async fn result_is_rechecked_at_intervals_and_then_given_up() {
+    let mut scenario = demo::scenario();
+    let menus = scenario.timeline[0].clone();
+    scenario.timeline.extend(std::iter::repeat_n(menus, 300));
+    let (mut engine, source) = engine(scenario);
+
+    // 架空の履歴には今の試合が載らないので、反映待ちが続く。
+    advance(&mut engine, MENUS + PREGAME + 6 + 1).await;
+    assert_eq!(source.history_calls(), 2, "試合直後に一度取り直す");
+    advance(&mut engine, 10).await;
+    assert_eq!(source.history_calls(), 2, "間隔を空ける");
+    advance(&mut engine, 1).await;
+    assert_eq!(source.history_calls(), 3, "間隔が過ぎたら取り直す");
+    advance(&mut engine, 200).await;
+    assert_eq!(source.history_calls(), 12, "上限に達したら諦める");
+}
+
+/// 新しい順の履歴。`placements` 件だけ tier のない試合を先頭に置く。
+fn history_with_placements(total: usize, placements: usize) -> serde_json::Value {
+    let matches: Vec<_> = (0..total)
+        .map(|i| serde_json::json!({
+            "MatchID": format!("page-{i}"), "MatchStartTime": 1_000_000 - i as i64,
+            "TierAfterUpdate": if i < placements { 0 } else { 15 },
+            "RankedRatingAfterUpdate": 40, "RankedRatingEarned": 10, "MapID": ""
+        }))
+        .collect();
+    serde_json::json!({ "Matches": matches })
+}
+
+#[tokio::test]
+async fn history_reaches_back_past_placement_matches() {
+    let mut scenario = demo::scenario();
+    scenario.history = Some(history_with_placements(30, 6));
+    let (mut engine, source) = engine(scenario);
+    let profile = advance(&mut engine, 1).await.profile.expect("profile");
+    assert_eq!(profile.history.len(), 20, "tier のない試合を除いても 20 試合そろう");
+    assert_eq!(source.history_calls(), 2);
+    assert_eq!(profile.history.last().unwrap().match_id.as_deref(), Some("page-6"));
+}
+
+#[tokio::test]
+async fn history_stops_when_the_account_has_few_matches() {
+    let mut scenario = demo::scenario();
+    scenario.history = Some(history_with_placements(7, 0));
+    let (mut engine, source) = engine(scenario);
+    let profile = advance(&mut engine, 1).await.profile.expect("profile");
+    assert_eq!(profile.history.len(), 7);
+    assert_eq!(source.history_calls(), 1, "足りない口座で余分に取得しない");
+}
+
+#[tokio::test]
+async fn a_match_without_own_row_does_not_block_the_rest() {
+    let mut scenario = demo::scenario();
+    let menus = scenario.timeline[0].clone();
+    scenario.timeline = vec![menus; 40];
+    let ids: Vec<String> = scenario.history.as_ref().unwrap()["Matches"]
+        .as_array().unwrap().iter()
+        .filter_map(|m| m["MatchID"].as_str().map(str::to_owned))
+        .filter(|id| scenario.matches.contains_key(id))
+        .collect();
+    assert!(ids.len() >= 2, "詳細のある試合が 2 件以上ないと検証にならない: {}", ids.len());
+    scenario.matches.get_mut(&ids[0]).unwrap()["players"] = serde_json::json!([]);
+    let (mut engine, _) = engine(scenario);
+    let profile = advance(&mut engine, 30).await.profile.expect("profile");
+    assert_eq!(profile.detailed_games as usize, ids.len() - 1);
+}
+
+#[tokio::test]
+async fn lobby_uses_the_party_api_with_own_member_first() {
+    let (mut engine, _) = engine(demo::scenario());
+    let lobby = advance(&mut engine, 2).await.lobby.expect("lobby");
+    assert!(lobby.party[0].is_own, "架空データではオーナーが相方でも自分が先頭");
+    assert_eq!(lobby.party.iter().filter(|m| m.is_own).count(), 1);
+    assert!(lobby.party[1].owner);
+    assert_eq!(lobby.party[1].name.as_deref(), Some("Friend#1111"));
+    assert_eq!(lobby.party[1].rank.as_ref().map(|r| r.tier), Some(14));
+    assert!(lobby.party[0].card_large.as_deref().unwrap().ends_with("/largeart.png"));
+    assert_eq!(lobby.invite_code, None);
+}
+
+#[tokio::test]
+async fn members_outside_the_friend_list_come_from_the_party_api() {
+    let mut scenario = demo::scenario();
+    let extra = scenario.party.as_ref().unwrap()["Members"][0].clone();
+    let mut stranger = extra;
+    stranger["Subject"] = "not-a-friend".into();
+    scenario.party.as_mut().unwrap()["Members"].as_array_mut().unwrap().push(stranger);
+    let (mut engine, _) = engine(scenario);
+    let lobby = advance(&mut engine, 1).await.lobby.expect("lobby");
+    assert_eq!(lobby.party.len(), 3, "プレゼンスにない人も枠に入る");
+    assert_eq!(lobby.party_size, 3);
+}
+
+#[tokio::test]
+async fn lobby_falls_back_to_presence_without_the_party_api() {
+    let mut scenario = demo::scenario();
+    scenario.party = None;
+    let (mut engine, _) = engine(scenario);
+    let lobby = advance(&mut engine, 1).await.lobby.expect("lobby");
+    assert_eq!(lobby.party.len(), 2);
+    assert!(lobby.party[0].is_own);
+    assert_eq!(lobby.party[1].card_large, None);
+}
+
+#[tokio::test]
+async fn party_is_not_refetched_every_tick() {
+    let mut scenario = demo::scenario();
+    let menus = scenario.timeline[0].clone();
+    scenario.timeline = vec![menus; 12];
+    let (mut engine, source) = engine(scenario);
+    advance(&mut engine, 11).await;
+    assert_eq!(source.party_calls(), 3, "最初の 1 回と、5 ティックごとの読み直し");
+}
+
+#[tokio::test]
+async fn a_party_event_refreshes_the_party_on_the_next_step() {
+    let mut scenario = demo::scenario();
+    let menus = scenario.timeline[0].clone();
+    scenario.timeline = vec![menus; 6];
+    let (mut engine, source) = engine(scenario);
+    advance(&mut engine, 2).await;
+    assert_eq!(source.party_calls(), 1);
+    engine.signals().party_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+    advance(&mut engine, 1).await;
+    assert_eq!(source.party_calls(), 2, "イベントがあれば間隔を待たずに読み直す");
+    advance(&mut engine, 1).await;
+    assert_eq!(source.party_calls(), 2, "合図は 1 回で消える");
+}
+
+#[tokio::test]
+async fn a_pregame_event_refetches_without_waiting_for_the_tick() {
+    let mut scenario = demo::scenario();
+    let pregame = scenario.timeline[MENUS].clone();
+    scenario.timeline = vec![pregame; 6];
+    let (mut engine, source) = engine(scenario);
+    advance(&mut engine, 2).await;
+    let before = source.pregame_calls();
+    engine.signals().pregame_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+    advance(&mut engine, 1).await;
+    assert_eq!(source.pregame_calls(), before + 1);
+}
+
+fn live_engine(scenario: Scenario) -> Engine {
+    Engine::new(Arc::new(ReplaySource::new(scenario).with_live_events()), None)
+}
+
+#[tokio::test]
+async fn connected_engine_sleeps_until_an_event_wakes_it() {
+    let mut scenario = demo::scenario();
+    scenario.timeline = vec![scenario.timeline[0].clone(); 3];
+    let mut engine = live_engine(scenario);
+    let snapshot = advance(&mut engine, 2).await;
+    assert!(snapshot.realtime);
+    assert_eq!(engine.idle_delay(GameState::Menus), vry_core::engine::EVENT_WATCHDOG);
+    assert_eq!(engine.idle_delay(GameState::InGame), vry_core::engine::EVENT_WATCHDOG);
+}
+
+#[tokio::test]
+async fn disconnected_engine_keeps_polling() {
+    let (mut engine, _) = engine(demo::scenario());
+    let snapshot = advance(&mut engine, 2).await;
+    assert!(!snapshot.realtime);
+    assert_eq!(engine.idle_delay(GameState::Menus).as_secs(), 3);
+}
+
+#[tokio::test]
+async fn pick_polling_stops_once_pick_events_arrive() {
+    let mut scenario = demo::scenario();
+    scenario.timeline = vec![scenario.timeline[MENUS].clone(); 6];
+    let mut engine = live_engine(scenario);
+    advance(&mut engine, 2).await;
+    assert_eq!(engine.idle_delay(GameState::Pregame).as_secs(), 3, "通知が届くと分かるまでは取得を続ける");
+    engine.signals().pregame_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+    advance(&mut engine, 1).await;
+    assert_eq!(engine.idle_delay(GameState::Pregame), vry_core::engine::EVENT_WATCHDOG);
+}

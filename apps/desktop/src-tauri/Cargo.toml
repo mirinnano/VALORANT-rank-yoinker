@@ -4,10 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "busters"
+path = "src/main.rs"
+
 [dependencies]
 base64 = "0.23.1"
+discord-rich-presence = "1.1.0"
 serde_json = "1.0.154"
-tauri = "2.12.5"
+tauri = { version = "2.12.5", features = [] }
 tauri-plugin-notification = "2.8.0"
 tokio = { version = "1.54.1", features = ["sync"] }
 tracing = "0.1.44"
@@ -15,4 +20,4 @@ tracing-subscriber = "0.3.23"
 vry-core = { version = "0.1.0", path = "../../../crates/core" }
 
 [build-dependencies]
-tauri-build = "2.7.4"
+tauri-build = { version = "2.7.4", features = [] }

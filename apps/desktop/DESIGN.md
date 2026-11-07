@@ -66,6 +66,30 @@ When the state moves from menus into a match, the app plays a tone, flashes the 
 notification. It never takes focus, and it stays silent when started during a match. Toasts can fail for an uninstalled
 portable executable, so the tone and flash carry the alert on their own. The setting lives on the Settings screen.
 
+## Lobby
+
+The lobby is the first screen. 上段に今の状態を特大で出し、中段にパーティの枠、右列に直近24時間の成績、次のランクまでの RR、前の試合、繰り返している課題を置く。
+
+パーティはパーティ API から読み、各メンバーの縦長バナー、称号、レベル、ランク、リーダーを枠に出す。API が使えないときはプレゼンスの範囲で表示する。招待コードは利用者の操作でだけ発行し、招待文には他のメンバーの名前を載せずランクだけを載せる。過去20試合の詳細がそろっていないときは、集計済みの件数を出す。
+
+メニュー画面では、Riot のプレゼンスからパーティの人数と公開設定、離席、キューの状態を読み、見出しの1行に出す。キューの経過時間はこのアプリが検知した時点から数える。`partyState` が未知の値なら通常のロビーとして扱う。
+
+履歴は振り分けなど tier のない試合を除いて20試合そろうまで、最大3ページさかのぼる。試合詳細の取得に3回失敗した試合は飛ばして次へ進み、次の試合の終了後に取り直す。
+
+試合後はプロフィールを一度取り直し、終わった試合が履歴に載るまで 30 秒間隔で最大 10 回確かめる。集計前に試合詳細がなかった試合も、このときに取り直す。
+
+## Updates
+
+WebSocket が動いている間は、Riot Client のイベントで起きて更新する。自分のプレゼンス、パーティ、エージェント選択の通知を購読する。待機の上限は 60 秒で、これはイベントの取りこぼしに備えた保険である。切断中、ピックの通知を確認できるまでのエージェント選択、試合詳細の集計中は 3 秒間隔で動く。上部に今の方式を表示する。
+
+## Store
+
+ストアとウォレットは読み取りだけで、購入の処理は持たない。出現を記録して過去の回数と前回の日付を出し、欲しい物に入れたスキンが新しい入れ替えで出たら通知する。
+
+## Discord
+
+自分の状態だけを Rich Presence に出す。ロビーではキューやパーティとランク、エージェント選択と試合中はマップ、スコア、自分のエージェントを出す。他のプレイヤーの情報は載せない。キュー、エージェント選択、試合中は経過時間を出す。設定画面で全体を無効にでき、ランク、スコア、パーティ人数、招待コードを個別に切り替えられる。招待コードはフレンド全員に見えるので初期状態では出さない。画像は `media.valorant-api.com` の URL を渡す。
+
 ## Tokens
 
 All colours and motion live in `ui/tokens.css`. Blue is the ally team, red is the enemy team and losses, yellow is you.

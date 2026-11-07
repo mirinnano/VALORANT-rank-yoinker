@@ -3,7 +3,7 @@
 //! Riot の private プレゼンスには、値が直下にある形式と `*PresenceData` の
 //! 下にある形式が混在する。[`lookup`] で両方を同じように読む。
 
-use crate::model::GameState;
+use crate::model::{GameState, LobbyPhase};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +28,9 @@ pub struct PrivatePresence {
     pub party_id: Option<String>,
     pub party_size: u32,
     pub party_state: Option<String>,
+    pub max_party_size: u32,
+    pub party_open: bool,
+    pub idle: bool,
     /// 進行中の試合のスコア。自分のチーム、相手の順。
     pub score: Option<(u32, u32)>,
 }
@@ -81,20 +84,62 @@ impl Presence {
                 .map(str::to_owned),
             party_size: lookup(&value, "partySize").and_then(Value::as_u64).unwrap_or(0) as u32,
             party_state: lookup_str(&value, "partyState").map(str::to_owned),
+            max_party_size: lookup(&value, "maxPartySize").and_then(Value::as_u64).unwrap_or(0) as u32,
+            party_open: lookup_str(&value, "partyAccessibility") == Some("OPEN"),
+            idle: lookup(&value, "isIdle").and_then(Value::as_bool).unwrap_or(false),
             score: match_score(&value),
         })
     }
 }
 
-/// Riot Client の WebSocket のメッセージから、自分のプレゼンスを取り出す。
-pub fn own_presence_event(message: &str, puuid: &str) -> Option<PrivatePresence> {
+impl PrivatePresence {
+    /// 未知の `partyState` は、通常のロビーとして扱う。
+    pub fn lobby_phase(&self) -> LobbyPhase {
+        match self.party_state.as_deref() {
+            Some("MATCHMAKING") => LobbyPhase::Queueing,
+            Some("MATCHMADE_GAME_STARTING") => LobbyPhase::MatchFound,
+            _ if self.custom_game => LobbyPhase::Custom,
+            _ => LobbyPhase::Ready,
+        }
+    }
+}
+
+/// Riot Client の WebSocket で受け取るイベント。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveEvent {
+    OwnPresence(PrivatePresence),
+    PartyChanged,
+    PregameChanged,
+}
+
+const MESSAGE_URI: &str = "/riot-messaging-service/v1/message/";
+
+/// WebSocket のメッセージを解釈する。他人のプレゼンスや無関係な通知は `None`。
+pub fn parse_live_event(message: &str, puuid: &str) -> Option<LiveEvent> {
     let value: Value = serde_json::from_str(message).ok()?;
     let payload = value.as_array()?.get(2)?;
-    if payload.get("uri")?.as_str()? != PRESENCE_URI {
+    let uri = payload.get("uri")?.as_str()?;
+    if let Some(topic) = uri.strip_prefix(MESSAGE_URI) {
+        return if topic.starts_with("ares-parties/") {
+            Some(LiveEvent::PartyChanged)
+        } else if topic.starts_with("ares-pregame/") {
+            Some(LiveEvent::PregameChanged)
+        } else {
+            None
+        };
+    }
+    if uri != PRESENCE_URI {
         return None;
     }
-    let presences: Vec<Presence> = serde_json::from_value(payload.get("data")?.get("presences")?.clone()).ok()?;
-    find_own(&presences, puuid)
+    // 形式の違う項目が混ざっても、自分の分は読めるように 1 件ずつ解釈する。
+    payload
+        .get("data")?
+        .get("presences")?
+        .as_array()?
+        .iter()
+        .filter(|entry| entry.get("puuid").and_then(Value::as_str) == Some(puuid))
+        .find_map(|entry| Presence::deserialize(entry).ok()?.decode())
+        .map(LiveEvent::OwnPresence)
 }
 
 /// 自分のプレゼンスを探す。
@@ -211,6 +256,29 @@ mod tests {
     }
 
     #[test]
+    fn reads_lobby_fields_and_phase_from_both_shapes() {
+        let flat = presence("a", json!({
+            "partyState": "MATCHMAKING", "maxPartySize": 5,
+            "partyAccessibility": "OPEN", "isIdle": true
+        })).decode().unwrap();
+        let nested = presence("a", json!({
+            "partyPresenceData": {"partyState": "MATCHMAKING", "maxPartySize": 5, "partyAccessibility": "OPEN"},
+            "playerPresenceData": {"isIdle": true}
+        })).decode().unwrap();
+        assert_eq!(flat, nested);
+        assert_eq!(flat.lobby_phase(), LobbyPhase::Queueing);
+        assert_eq!((flat.max_party_size, flat.party_open, flat.idle), (5, true, true));
+    }
+
+    #[test]
+    fn unknown_party_state_is_a_plain_lobby() {
+        let p = presence("a", json!({"partyState": "SOMETHING_NEW"})).decode().unwrap();
+        assert_eq!(p.lobby_phase(), LobbyPhase::Ready);
+        let custom = presence("a", json!({"partyState": "CUSTOM_GAME_SETUP"})).decode().unwrap();
+        assert_eq!(custom.lobby_phase(), LobbyPhase::Custom);
+    }
+
+    #[test]
     fn detects_custom_game_from_party_state() {
         let p = presence("a", json!({"partyPresenceData": {"partyState": "CUSTOM_GAME_SETUP"}}));
         assert!(p.decode().unwrap().custom_game);
@@ -240,16 +308,40 @@ mod tests {
     #[test]
     fn reads_own_state_from_a_websocket_message() {
         let own = presence("me", json!({"sessionLoopState": "PREGAME", "partyState": "DEFAULT"}));
-        let found = own_presence_event(&event(&own), "me").unwrap();
+        let Some(LiveEvent::OwnPresence(found)) = parse_live_event(&event(&own), "me") else {
+            panic!("own presence expected");
+        };
         assert_eq!(found.state, Some(GameState::Pregame));
     }
 
     #[test]
     fn ignores_other_players_and_other_messages() {
         let friend = presence("friend", json!({"sessionLoopState": "INGAME"}));
-        assert!(own_presence_event(&event(&friend), "me").is_none());
-        assert!(own_presence_event("[5, \"subscribe\"]", "me").is_none());
-        assert!(own_presence_event("not json", "me").is_none());
+        assert!(parse_live_event(&event(&friend), "me").is_none());
+        assert!(parse_live_event("[5, \"subscribe\"]", "me").is_none());
+        assert!(parse_live_event("not json", "me").is_none());
+    }
+
+    #[test]
+    fn a_malformed_entry_does_not_hide_own_presence() {
+        let own = presence("me", json!({"sessionLoopState": "INGAME"}));
+        let data = json!({"uri": "/chat/v4/presences", "data": {"presences": [
+            {"unexpected": true},
+            {"puuid": "me", "private": own.private, "product": "valorant"}
+        ]}});
+        let message = json!([8, "OnJsonApiEvent_chat_v4_presences", data]).to_string();
+        assert!(matches!(parse_live_event(&message, "me"), Some(LiveEvent::OwnPresence(_))));
+    }
+
+    #[test]
+    fn messaging_events_are_classified_by_service() {
+        let message = |uri: &str| json!([8, "OnJsonApiEvent_riot-messaging-service_v1_message", {"uri": uri}]).to_string();
+        let party = message("/riot-messaging-service/v1/message/ares-parties/parties/v1/parties/x");
+        let pregame = message("/riot-messaging-service/v1/message/ares-pregame/pregame/v1/matches/x");
+        let other = message("/riot-messaging-service/v1/message/ares-core-game/core-game/v1/matches/x");
+        assert_eq!(parse_live_event(&party, "me"), Some(LiveEvent::PartyChanged));
+        assert_eq!(parse_live_event(&pregame, "me"), Some(LiveEvent::PregameChanged));
+        assert_eq!(parse_live_event(&other, "me"), None);
     }
 
     #[test]

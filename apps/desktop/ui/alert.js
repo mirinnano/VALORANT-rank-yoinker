@@ -48,3 +48,68 @@ alertToggle.addEventListener("change", () => {
   }
 });
 document.getElementById("test-alert").addEventListener("click", playAlert);
+
+const DISCORD_SETTING_KEY = "discord-presence-enabled";
+const DISCORD_OPTIONS_KEY = "discord-presence-options";
+const DISCORD_DEFAULTS = { rank: true, score: true, party: true, invite: false };
+const DISCORD_STATUS_MS = 5000;
+const discordToggle = document.getElementById("discord-presence");
+const discordOptionBoxes = Object.keys(DISCORD_DEFAULTS).map((key) => [key, document.getElementById(`discord-${key}`)]);
+// main.js より先に読み込まれるので、ここでは共通の invoke を使えない。
+const discordInvoke = window.__TAURI__.core.invoke;
+
+function readStored(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // 保存できなくても、今回の起動では画面の状態どおりに動く。
+  }
+}
+
+function storedDiscordOptions() {
+  try {
+    return { ...DISCORD_DEFAULTS, ...JSON.parse(readStored(DISCORD_OPTIONS_KEY) ?? "{}") };
+  } catch {
+    return DISCORD_DEFAULTS;
+  }
+}
+
+function sendDiscordOptions() {
+  const options = Object.fromEntries(discordOptionBoxes.map(([key, box]) => [key, box.checked]));
+  writeStored(DISCORD_OPTIONS_KEY, JSON.stringify(options));
+  discordInvoke("set_discord_options", { options });
+}
+
+async function showDiscordStatus() {
+  const status = document.getElementById("discord-status");
+  if (!discordToggle.checked) {
+    status.textContent = "Discord への表示は止まっています。";
+    return;
+  }
+  const connected = await discordInvoke("discord_connected");
+  status.textContent = connected ? "Discord に接続しています。" : "Discord を起動すると接続します。";
+}
+
+const storedOptions = storedDiscordOptions();
+for (const [key, box] of discordOptionBoxes) {
+  box.checked = storedOptions[key];
+  box.addEventListener("change", sendDiscordOptions);
+}
+discordToggle.checked = readStored(DISCORD_SETTING_KEY) !== "false";
+discordInvoke("set_discord_enabled", { enabled: discordToggle.checked });
+sendDiscordOptions();
+discordToggle.addEventListener("change", () => {
+  discordInvoke("set_discord_enabled", { enabled: discordToggle.checked });
+  writeStored(DISCORD_SETTING_KEY, String(discordToggle.checked));
+  showDiscordStatus();
+});
+showDiscordStatus();
+setInterval(showDiscordStatus, DISCORD_STATUS_MS);
