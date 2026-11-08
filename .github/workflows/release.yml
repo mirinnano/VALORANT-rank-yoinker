@@ -41,6 +41,8 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: busters.gg ${{ github.ref_name }}
           releaseBody: |
+            0.x の間はベータ版です。不具合は Issues に送ってください。
+
             ## インストール
             `busters.gg_*_x64-setup.exe` をダウンロードして実行してください。管理者権限は要りません。
             インストール済みの場合は、アプリが新しい版を知らせます。
