@@ -13,6 +13,11 @@ on:
 permissions:
   contents: read
 
+# 同じブランチへ続けて push したら、古い実行を止める。リリース用の実行には付けない。
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     runs-on: windows-latest
