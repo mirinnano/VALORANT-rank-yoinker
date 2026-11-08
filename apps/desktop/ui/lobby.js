@@ -1,11 +1,10 @@
 const LOBBY_STATUS = { ready: "READY", queueing: "QUEUEING", match_found: "MATCH FOUND", custom: "CUSTOM" };
-const DAY_MS = 86_400_000;
 const FULL_PARTY = 5;
 const RR_PER_RANK = 100;
 /** Immortal 以上は RR の上限がなく、次のランクまでの距離を出せない。 */
 const LAST_LADDER_TIER = 24;
 const INVITE_HOLD_MS = 20_000;
-const lobbyView = { signature: "", phase: null, invite: null, link: null };
+const lobbyView = { signature: "", phase: null, invite: null, link: null, recruitOpen: false };
 
 function memberBanner(member, profile) {
   const banner = element("li", member.is_own ? "party-banner is-own" : "party-banner");
@@ -145,12 +144,21 @@ function inviteBlock(snapshot) {
     if (code) block.append(element("p", "invite-code", code));
     if (link) block.append(element("p", "invite-link", link));
     block.append(element("p", "invite-message", message));
-    if (link) block.append(actionButton("リンクをコピー", "primary", () => copyText(link, status, "リンクをコピーしました。")));
-    if (code) block.append(actionButton("コードをコピー", link ? "tag" : "primary", () => copyText(code, status, "コードをコピーしました。")));
-    block.append(
+    const copyLink = () => copyText(link, status, "リンクをコピーしました。");
+    const copyCode = () => copyText(code, status, "コードをコピーしました。");
+    block.append(link ? actionButton("リンクをコピー", "primary", copyLink) : actionButton("コードをコピー", "primary", copyCode));
+    const actions = element("div", "invite-actions");
+    if (link && code) actions.append(actionButton("コードをコピー", "tag", copyCode));
+    const recruit = actionButton("募集画像を作る", "tag", () => toggleRecruit(block, recruit, snapshot, code, link));
+    recruit.setAttribute("aria-expanded", "false");
+    actions.append(
       actionButton("招待文をコピー", "tag", () => copyText(message, status, "招待文をコピーしました。")),
-      actionButton("無効にする", "tag", () => changeInvite(false, status)),
+      recruit,
+      actionButton("招待を無効にする", "tag", () => changeInvite(false, status)),
     );
+    block.append(actions);
+    // 再描画で閉じないよう、開いていた募集画像は開き直す。
+    if (lobbyView.recruitOpen) queueMicrotask(() => toggleRecruit(block, recruit, snapshot, code, link));
   } else {
     block.append(
       element("p", "lobby-note", "コードかリンクを知っている人がパーティへ参加できます。リンクを発行できるのはリーダーだけです。"),
@@ -158,34 +166,6 @@ function inviteBlock(snapshot) {
     );
   }
   block.append(status);
-  return block;
-}
-
-/** 勝敗は RR の増減で数える。増減なしは引き分けとして含めない。 */
-function lastDay(history, now) {
-  const games = history.filter((point) => now - point.at_ms < DAY_MS);
-  return {
-    games: games.length,
-    wins: games.filter((point) => point.earned > 0).length,
-    losses: games.filter((point) => point.earned < 0).length,
-    rr: games.reduce((sum, point) => sum + point.earned, 0),
-  };
-}
-
-function todayBlock(profile) {
-  const block = element("section", "lobby-block");
-  block.append(element("h2", "", "LAST 24H / 直近24時間"));
-  const day = lastDay(profile.history, Date.now());
-  if (day.games === 0) {
-    block.append(element("p", "lobby-note", "この24時間のコンペティティブはまだありません。"));
-    return block;
-  }
-  const figures = element("div", "hero-figures");
-  figures.append(
-    figure(`${day.wins}勝 ${day.losses}敗`, `${day.games}試合`),
-    figure(formatSigned(day.rr), "RR", signClass(day.rr)),
-  );
-  block.append(figures);
   return block;
 }
 
@@ -200,6 +180,8 @@ function ladderBlock(profile) {
   fill.style.transform = `scaleX(${Math.min(rr / RR_PER_RANK, 1)})`;
   bar.append(fill);
   block.append(bar);
+  const note = rankUpNote(profile);
+  if (note) block.append(note);
   return block;
 }
 
@@ -238,7 +220,7 @@ function lobbySide(profile, snapshot) {
     return side;
   }
   const repeated = element("div");
-  side.append(...[todayBlock(profile), ladderBlock(profile), lastMatchBlock(profile), repeated, syncNote(profile)].filter(Boolean));
+  side.append(...[sessionBlock(profile, "lobby-block", false), ladderBlock(profile), lastMatchBlock(profile), repeated, syncNote(profile)].filter(Boolean));
   loadTagTrend(repeated);
   return side;
 }

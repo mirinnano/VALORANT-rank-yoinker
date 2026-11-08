@@ -345,6 +345,21 @@ pub struct GroupStats {
     pub acs: Option<u32>,
     pub kast: Option<u32>,
     pub kd: Option<f64>,
+    pub adr: Option<u32>,
+    pub headshot_percent: Option<u32>,
+    /// 攻撃と防衛のラウンド勝率。マップごとの得手不得手を見るのに使う。
+    pub attack: RoundRecord,
+    pub defense: RoundRecord,
+}
+
+/// マップとエージェントの組み合わせごとの成績。
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PairStats {
+    pub map: String,
+    pub agent: String,
+    pub games: u32,
+    pub wins: u32,
+    pub acs: Option<u32>,
 }
 
 /// グラフと時間帯の集計に使う、1 試合分の値。
@@ -400,6 +415,8 @@ pub struct Summary {
     pub defense: RoundRecord,
     pub maps: Vec<GroupStats>,
     pub agents: Vec<GroupStats>,
+    /// 試合数の多い順。
+    pub pairs: Vec<PairStats>,
 }
 
 fn ratio(kills: u32, deaths: u32) -> Option<f64> {
@@ -460,10 +477,35 @@ where
                 acs: sum.acs(),
                 kast: sum.kast(),
                 kd: ratio(sum.kills, sum.deaths),
+                adr: sum.adr(),
+                headshot_percent: sum.headshot_percent(),
+                attack: sum.attack,
+                defense: sum.defense,
             }
         })
         .collect();
     stats.sort_by(|a, b| b.games.cmp(&a.games).then(a.name.cmp(&b.name)));
+    stats
+}
+
+fn pairs(games: &[MatchMetrics]) -> Vec<PairStats> {
+    let mut grouped: BTreeMap<(&str, &str), Vec<&MatchMetrics>> = BTreeMap::new();
+    for game in games {
+        if let (Some(map), Some(agent)) = (&game.map, &game.agent) {
+            grouped.entry((map, agent)).or_default().push(game);
+        }
+    }
+    let mut stats: Vec<PairStats> = grouped
+        .into_iter()
+        .map(|((map, agent), entries)| PairStats {
+            map: map.to_owned(),
+            agent: agent.to_owned(),
+            games: entries.len() as u32,
+            wins: entries.iter().filter(|game| game.won == Some(true)).count() as u32,
+            acs: total(&entries).acs(),
+        })
+        .collect();
+    stats.sort_by(|a, b| b.games.cmp(&a.games).then(a.map.cmp(&b.map)).then(a.agent.cmp(&b.agent)));
     stats
 }
 
@@ -544,6 +586,7 @@ pub fn summarize(games: &[MatchMetrics]) -> Summary {
         defense: sum.defense,
         maps: groups(games, |game| game.map.as_ref()),
         agents: groups(games, |game| game.agent.as_ref()),
+        pairs: pairs(games),
     }
 }
 
@@ -778,5 +821,28 @@ mod tests {
     fn no_deaths_does_not_divide_by_zero() {
         assert_eq!(ratio(5, 0), Some(5.0));
         assert_eq!(ratio(0, 0), None);
+    }
+
+    #[test]
+    fn groups_carry_side_records_and_pairs_count_each_combination() {
+        let game = |map: &str, agent: &str, won| MatchMetrics {
+            map: Some(map.into()),
+            agent: Some(agent.into()),
+            won: Some(won),
+            rounds: 10,
+            score: 2000,
+            damage: 1500,
+            attack: RoundRecord { played: 5, won: 3 },
+            defense: RoundRecord { played: 5, won: 1 },
+            ..MatchMetrics::default()
+        };
+        let summary = summarize(&[game("Ascent", "Jett", true), game("Ascent", "Jett", false), game("Bind", "Sova", true)]);
+        let ascent = summary.maps.iter().find(|group| group.name == "Ascent").unwrap();
+        assert_eq!(ascent.attack, RoundRecord { played: 10, won: 6 });
+        assert_eq!(ascent.defense.percent(), Some(20));
+        assert_eq!(ascent.adr, Some(150));
+        assert_eq!(summary.pairs.len(), 2);
+        assert_eq!((summary.pairs[0].map.as_str(), summary.pairs[0].agent.as_str()), ("Ascent", "Jett"));
+        assert_eq!((summary.pairs[0].games, summary.pairs[0].wins), (2, 1));
     }
 }

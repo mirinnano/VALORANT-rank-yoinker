@@ -170,6 +170,7 @@ function renderHome(view, profile) {
   );
 
   const home = element("div", "home");
+  home.append(sessionBlock(profile, "home-session"));
   if (profile.history.length < 2) {
     home.append(noticeBox("RR の推移はまだ表示できません", "コンペティティブを2試合遊ぶと、ここに RR の推移が表示されます。"));
   } else {

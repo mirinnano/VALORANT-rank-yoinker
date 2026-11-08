@@ -81,6 +81,26 @@ async fn live_score_updates_without_refetching_the_match() {
 }
 
 #[tokio::test]
+async fn parties_update_when_presences_arrive_during_the_match() {
+    let mut scenario = demo::scenario();
+    let enemies = ["demo-enemy-1", "demo-enemy-2"];
+    // 試合が始まった直後は、相手のプレゼンスがまだ届いていない。
+    scenario.timeline[MENUS + PREGAME]
+        .retain(|presence| !enemies.contains(&presence["puuid"].as_str().unwrap_or_default()));
+    let (mut engine, source) = engine(scenario);
+
+    let party_of = |snapshot: &vry_core::model::MatchSnapshot, id: &str| {
+        snapshot.players.iter().find(|player| player.puuid == id).unwrap().party
+    };
+    let first = advance(&mut engine, MENUS + PREGAME + 1).await;
+    assert_eq!(party_of(&first, "demo-enemy-1"), None);
+    let later = advance(&mut engine, 1).await;
+    assert!(party_of(&later, "demo-enemy-1").is_some());
+    assert_eq!(party_of(&later, "demo-enemy-1"), party_of(&later, "demo-enemy-2"));
+    assert_eq!(source.coregame_calls(), 1, "組の付け直しで試合を取り直さない");
+}
+
+#[tokio::test]
 async fn profile_loads_when_the_app_starts_during_a_match() {
     let mut scenario = demo::scenario();
     scenario.timeline = vec![scenario.timeline[MENUS + PREGAME].clone()];

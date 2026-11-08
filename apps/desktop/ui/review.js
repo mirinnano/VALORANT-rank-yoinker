@@ -382,7 +382,8 @@ function renderReview(pane, review) {
   inner.append(highlightSection(review), timeline, side, scoreboard(review));
   const panel = element("div");
   panel.id = "share-panel";
-  pane.replaceChildren(hero, panel, inner);
+  const summary = review.match_id === afterMatch.matchId ? afterMatchPanel(review) : null;
+  pane.replaceChildren(...[hero, summary, panel, inner].filter(Boolean));
   // 最初に見直す場所が分かるよう、先頭の気づきのラウンドを示す。
   const first = review.findings.find((finding) => finding.tone === "focus" && finding.rounds.length);
   if (first) {
@@ -456,6 +457,8 @@ async function openReview(matchId, attempt = 0) {
   reviewState.requestId += 1;
   const requestId = reviewState.requestId;
   reviewState.opening = matchId;
+  // 別の試合を開いたら、試合直後のまとめは閉じる。
+  if (matchId !== afterMatch.matchId) afterMatch.matchId = null;
 
   const view = document.getElementById("review-view");
   ensureReviewLayout(view);

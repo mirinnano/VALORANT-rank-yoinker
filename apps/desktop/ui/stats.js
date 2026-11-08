@@ -3,6 +3,10 @@ const ROUND_ROWS = [
   ["attack", "攻撃"], ["defense", "防衛"],
 ];
 const MAX_GROUP_ROWS = 8;
+/** 得手不得手を言うのに必要な最低の試合数。これより少ないと偶然の差が大きい。 */
+const MIN_STANDOUT_GAMES = 3;
+const MATRIX_AGENTS = 5;
+const MATRIX_MAPS = 8;
 
 function rateRow(label, record) {
   const row = element("div", "rate-row");
@@ -15,13 +19,18 @@ function rateRow(label, record) {
   return row;
 }
 
-function groupTable(title, groups, firstCell) {
+function sidePercent(record) {
+  return record?.played ? `${Math.round((record.won / record.played) * 100)}%` : null;
+}
+
+/** `sides` が真ならマップ用に攻撃と防衛のラウンド勝率を足す。 */
+function groupTable(title, groups, firstCell, sides = false) {
   const table = element("table");
   table.setAttribute("aria-label", title);
   const head = element("tr");
-  for (const [label, className] of [[title, ""], ["試合", "num"], ["勝率", "num"], ["ACS", "num"], ["K/D", "num"]]) {
-    head.append(element("th", className, label));
-  }
+  const columns = [[title, ""], ["試合", "num"], ["勝率", "num"], ["ACS", "num"], ["ADR", "num"], ["K/D", "num"], ["HS%", "num"]];
+  if (sides) columns.push(["攻撃", "num"], ["防衛", "num"]);
+  for (const [label, className] of columns) head.append(element("th", className, label));
   const thead = element("thead");
   thead.append(head);
   const body = element("tbody");
@@ -32,12 +41,109 @@ function groupTable(title, groups, firstCell) {
       valueCell(group.games),
       valueCell(percentOf(group.wins, group.games)),
       valueCell(group.acs),
+      valueCell(group.adr),
       valueCell(group.kd === null ? null : group.kd.toFixed(2)),
+      valueCell(group.headshot_percent),
     );
+    if (sides) row.append(valueCell(sidePercent(group.attack)), valueCell(sidePercent(group.defense)));
     body.append(row);
   }
   table.append(thead, body);
   return table;
+}
+
+function winRate(group) {
+  return group.games ? group.wins / group.games : 0;
+}
+
+/** 試合数が足りる中で、勝率が最も高いものと低いものを選ぶ。 */
+function extremes(groups) {
+  const enough = groups.filter((group) => group.games >= MIN_STANDOUT_GAMES);
+  if (enough.length < 2) return null;
+  const sorted = [...enough].sort((a, b) => winRate(b) - winRate(a) || (b.acs ?? 0) - (a.acs ?? 0));
+  // 勝率が並んでいるときに、片方を苦手と呼ばない。
+  if (winRate(sorted[0]) === winRate(sorted.at(-1))) return null;
+  return { best: sorted[0], worst: sorted.at(-1) };
+}
+
+function standoutCard(kind, label, group, icon) {
+  const card = element("div", `standout is-${kind}`);
+  const name = element("b", "standout-name");
+  if (icon) name.append(icon);
+  name.append(group.name);
+  card.append(
+    element("span", "standout-label", label),
+    name,
+    element("span", "standout-value", `勝率 ${percentOf(group.wins, group.games)}　${group.games}試合　ACS ${group.acs ?? "－"}`),
+  );
+  return card;
+}
+
+function standoutSection(summary) {
+  const maps = extremes(summary.maps);
+  const agents = extremes(summary.agents);
+  const section = element("section", "standouts");
+  section.append(element("h2", "", "STRENGTHS / 得意と苦手"));
+  if (!maps && !agents) {
+    section.append(element("p", "stats-note", `${MIN_STANDOUT_GAMES}試合以上遊んだマップやエージェントが2つ以上になると表示します。`));
+    return section;
+  }
+  const grid = element("div", "standout-grid");
+  if (maps) grid.append(standoutCard("best", "得意なマップ", maps.best), standoutCard("worst", "苦手なマップ", maps.worst));
+  if (agents) {
+    grid.append(
+      standoutCard("best", "得意なエージェント", agents.best, agentIcon(agents.best.name, 24)),
+      standoutCard("worst", "苦手なエージェント", agents.worst, agentIcon(agents.worst.name, 24)),
+    );
+  }
+  section.append(grid);
+  return section;
+}
+
+/** マップごとに、よく使うエージェントでの勝敗を並べる。色の濃さは勝率。 */
+function pairMatrix(summary) {
+  const agents = summary.agents.slice(0, MATRIX_AGENTS).map((group) => group.name);
+  const maps = summary.maps.slice(0, MATRIX_MAPS).map((group) => group.name);
+  const section = element("section", "pair-section");
+  section.append(element("h2", "", "MAP × AGENT / 組み合わせの勝敗"));
+  if (agents.length === 0 || maps.length === 0) {
+    section.append(element("p", "stats-note", "試合の詳細が集まると表示します。"));
+    return section;
+  }
+  const pairs = new Map((summary.pairs ?? []).map((pair) => [`${pair.map}\n${pair.agent}`, pair]));
+  const table = element("table", "pair-matrix");
+  table.setAttribute("aria-label", "マップとエージェントの組み合わせごとの勝敗");
+  const head = element("tr");
+  head.append(element("th", "", "マップ"));
+  for (const agent of agents) {
+    const cell = element("th", "num");
+    cell.title = agent;
+    cell.setAttribute("aria-label", agent);
+    cell.append(agentIcon(agent, 26));
+    head.append(cell);
+  }
+  const thead = element("thead");
+  thead.append(head);
+  const body = element("tbody");
+  for (const map of maps) {
+    const row = element("tr");
+    row.append(element("td", "name", map));
+    for (const agent of agents) {
+      const pair = pairs.get(`${map}\n${agent}`);
+      if (!pair) {
+        row.append(element("td", "num absent", "－"));
+        continue;
+      }
+      const cell = element("td", "num pair-cell", `${pair.wins}-${pair.games - pair.wins}`);
+      cell.style.setProperty("--rate", String(winRate(pair)));
+      cell.title = `${map} / ${agent}: ${pair.games}試合 ${pair.wins}勝、ACS ${pair.acs ?? "－"}`;
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(thead, body);
+  section.append(table, element("p", "stats-note", "勝ち-負け。白が濃いほど勝率が高い組み合わせです。"));
+  return section;
 }
 
 function agentCell(group) {
@@ -163,10 +269,10 @@ function renderStats(view, summary) {
   const agents = element("section");
   agents.append(groupTable("エージェント", summary.agents, agentCell));
   const maps = element("section");
-  maps.append(groupTable("マップ", summary.maps, (group) => element("td", "name", group.name)));
+  maps.append(groupTable("マップ", summary.maps, (group) => element("td", "name", group.name), true));
 
   const grid = element("div", "stats-grid");
-  grid.append(form, rounds, mental, time, agents, maps);
+  grid.append(standoutSection(summary), form, rounds, mental, time, agents, maps, pairMatrix(summary));
   const roleLabel = ROLE_FOCUS[role]?.label;
   view.replaceChildren(
     displayText("h2", `Last ${summary.games}`, "stats-title"),

@@ -461,6 +461,76 @@ function ensureMatchLayout(view) {
   });
 }
 
+/** パーティの組み方。2人以上の組を大きい順に並べ、残りをソロとして数える。 */
+function teamMakeup(players) {
+  const sizes = new Map();
+  for (const player of players) if (player.party) sizes.set(player.party, (sizes.get(player.party) ?? 0) + 1);
+  const groups = [...sizes.values()].filter((size) => size > 1).sort((a, b) => b - a);
+  const solo = players.length - groups.reduce((sum, size) => sum + size, 0);
+  if (groups.length === 0) return "全員ソロ";
+  return [`パーティ ${groups.join("+")}`, solo ? `ソロ ${solo}` : null].filter(Boolean).join(" / ");
+}
+
+function averageOf(values) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+/** ランクのある人だけで平均 tier を出す。ランクなしを 0 として混ぜると低く出る。 */
+function teamFacts(players) {
+  const ranked = players.filter((player) => !player.loading && player.rank.tier > 0);
+  const top = ranked.reduce((best, player) => (player.rank.tier > (best?.rank.tier ?? 0) ? player : best), null);
+  const rates = players.map((player) => player.win_rate).filter((rate) => rate !== null);
+  const recent = players.flatMap((player) => player.recent_rr);
+  return {
+    tier: averageOf(ranked.map((player) => player.rank.tier)),
+    ranked: ranked.length,
+    top: top?.rank ?? null,
+    makeup: teamMakeup(players),
+    winRate: rates.length ? Math.round(averageOf(rates)) : null,
+    wins: recent.filter((rr) => rr > 0).length,
+    losses: recent.filter((rr) => rr < 0).length,
+  };
+}
+
+function bandSide(label, facts, average) {
+  const side = element("div", "band-side");
+  const head = element("div", "band-head");
+  head.append(element("span", "band-label", label));
+  if (average) head.append(rankIcon(average.tier, 28), element("b", "", average.name));
+  else head.append(element("b", "absent", "ランク不明"));
+  const list = element("dl", "band-facts");
+  fact(list, "構成", facts.makeup);
+  fact(list, "最高", facts.top?.name ?? null);
+  fact(list, "平均勝率", facts.winRate === null ? null : `${facts.winRate}%`);
+  fact(list, "5人の直近5戦", facts.wins + facts.losses ? `${facts.wins}勝 ${facts.losses}敗` : null);
+  side.append(head, list);
+  return side;
+}
+
+/** 平均 tier の差。1 tier はランクの 1 段に当たる。 */
+function bandGap(ally, enemy) {
+  if (ally.tier === null || enemy.tier === null) return element("p", "band-gap absent", "ランクのある人が少なく、差を出せません");
+  const gap = Math.round((enemy.tier - ally.tier) * 10) / 10;
+  if (Math.abs(gap) < 0.5) return element("p", "band-gap", "平均ランクはほぼ互角");
+  const text = gap > 0 ? `相手が平均 ${gap} 段上` : `味方が平均 ${-gap} 段上`;
+  return element("p", gap > 0 ? "band-gap is-behind" : "band-gap is-ahead", text);
+}
+
+/** 試合中に味方と相手を見比べる帯。ピック中や相手が見えないときは出さない。 */
+function teamBand(snapshot, allies, enemies) {
+  if (enemies.length === 0) return null;
+  const ally = teamFacts(allies);
+  const enemy = teamFacts(enemies);
+  const band = element("section", "team-band");
+  band.setAttribute("aria-label", "THIS MATCH / 味方と相手の比較");
+  band.append(
+    bandSide("ALLY", ally, snapshot.ally_average),
+    bandGap(ally, enemy),
+    bandSide("ENEMY", enemy, snapshot.enemy_average),
+  );
+  return band;
+}
+
 function renderTable(view, snapshot) {
   const allies = snapshot.players.filter((player) => !isEnemy(player));
   const enemies = snapshot.players.filter(isEnemy);
@@ -475,7 +545,7 @@ function renderTable(view, snapshot) {
   thead.append(head);
   table.append(thead, teamGroup("ALLY", allies, snapshot.ally_average));
   if (enemies.length) table.append(teamGroup("ENEMY", enemies, snapshot.enemy_average));
-  view.querySelector(".table-pane").replaceChildren(table);
+  view.querySelector(".table-pane").replaceChildren(...[teamBand(snapshot, allies, enemies), table].filter(Boolean));
 
   const known = snapshot.players.some((player) => player.key === match.selected);
   const own = snapshot.players.find((player) => player.relation === "own");

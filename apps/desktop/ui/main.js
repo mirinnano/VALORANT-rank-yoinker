@@ -127,6 +127,7 @@ function renderSnapshot(snapshot) {
       reviewState.review = null;
       reviewState.opening = null;
       reviewState.justFinished = true;
+      afterMatch.matchId = snapshot.finished_match ?? null;
       homeReveal.pending = true;
       showView("review");
       if (snapshot.finished_match) openReview(snapshot.finished_match);
@@ -139,6 +140,7 @@ function renderSnapshot(snapshot) {
     app.profileSignature = signature;
     renderHome(views.home, app.profile);
     renderStats(views.stats, app.profile?.summary);
+    refreshAfterMatch();
   }
   if (!app.profile) renderHome(views.home, null);
   if (!inMatch) renderLobby(views.lobby, snapshot, app.profile);

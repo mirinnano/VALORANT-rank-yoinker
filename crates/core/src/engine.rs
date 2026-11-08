@@ -383,9 +383,10 @@ impl Engine {
             GameState::Pregame => {
                 let pushed = self.signals.pregame_changed.swap(false, Ordering::Relaxed);
                 self.pregame_pushed |= pushed;
-                if let Some(snapshot) = self.reusable(state) {
+                if let Some(mut snapshot) = self.reusable(state) {
                     self.pregame_ticks += 1;
                     if !pushed && self.pregame_ticks % PREGAME_REFRESH_TICKS != 0 {
+                        self.refresh_parties(&mut snapshot, &presences);
                         return Ok(snapshot);
                     }
                 }
@@ -397,6 +398,7 @@ impl Engine {
             GameState::InGame => {
                 if let Some(mut snapshot) = self.reusable(state) {
                     snapshot.score = own.score;
+                    self.refresh_parties(&mut snapshot, &presences);
                     return Ok(snapshot);
                 }
                 match self.source.coregame(&puuid).await? {
@@ -468,6 +470,11 @@ impl Engine {
                 None
             }
         };
+    }
+
+    /// 直前にロビーで読んだパーティ API の顔ぶれ。フレンド以外のメンバーも含む。
+    fn api_party_members(&self) -> Vec<String> {
+        self.party_info.as_ref().map(|info| info.members.iter().map(|member| member.puuid.clone()).collect()).unwrap_or_default()
     }
 
     /// 名前は新しいメンバーの分だけ取得する。パーティ API が使えなければプレゼンスの範囲で出す。
@@ -765,6 +772,28 @@ impl Engine {
         }
     }
 
+    /// 試合中も、届いたプレゼンスで組を付け直す。味方や相手のプレゼンスは
+    /// 試合が始まってから届くことがあり、最初の組み立てだけでは取りこぼす。
+    fn refresh_parties(&mut self, snapshot: &mut MatchSnapshot, presences: &[Presence]) {
+        let ids: Vec<String> = snapshot.players.iter().map(|player| player.puuid.clone()).collect();
+        let own_party = self.api_party_members();
+        let known = if own_party.len() > 1 { vec![own_party] } else { Vec::new() };
+        let numbers = presence::party_numbers(presences, &ids, &known);
+        let mut changed = false;
+        for player in &mut snapshot.players {
+            let number = numbers.get(&player.puuid).copied();
+            if player.party != number {
+                player.party = number;
+                changed = true;
+            }
+        }
+        if changed {
+            if let Some(current) = self.current.as_mut() {
+                current.players.clone_from(&snapshot.players);
+            }
+        }
+    }
+
     fn reusable(&self, state: GameState) -> Option<MatchSnapshot> {
         self.current.clone().filter(|snapshot| snapshot.state == state)
     }
@@ -782,7 +811,9 @@ impl Engine {
             self.active_match = raw.match_id.clone();
         }
 
-        let party: HashSet<String> = presence::party_members(presences, puuid).into_iter().collect();
+        // プレゼンスにはフレンドしか載らないことがあるので、パーティ API の顔ぶれも足す。
+        let mut party: HashSet<String> = presence::party_members(presences, puuid).into_iter().collect();
+        party.extend(self.api_party_members());
         let names = self
             .source
             .names(&roster::names_to_fetch(&raw.players, puuid, &party))
@@ -850,7 +881,9 @@ impl Engine {
         let my_team = roster::my_team(&raw.players, view.puuid).map(str::to_owned);
         roster::display_order(&mut raw.players, my_team.as_deref(), &self.extras);
         let ids: Vec<String> = raw.players.iter().map(|p| p.subject.clone()).collect();
-        let party_numbers = presence::party_numbers(view.presences, &ids);
+        let own_party = self.api_party_members();
+        let known = if own_party.len() > 1 { vec![own_party] } else { Vec::new() };
+        let party_numbers = presence::party_numbers(view.presences, &ids, &known);
         let connection = self.connection.as_ref().expect("connected before build");
         let mut snapshot = roster::build_snapshot(
             raw,

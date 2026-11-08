@@ -163,15 +163,22 @@ pub fn party_members(presences: &[Presence], own: &str) -> Vec<String> {
 }
 
 /// `players` の並び順で、同じ試合に2人以上いるパーティへ 1 から番号を振る。
-pub fn party_numbers(presences: &[Presence], players: &[String]) -> HashMap<String, u32> {
-    let parties: HashMap<&str, String> = presences
+///
+/// プレゼンスに載るのはフレンドなどに限られる。`known` は、パーティ API など
+/// プレゼンス以外で分かった組で、プレゼンスより優先する。
+pub fn party_numbers(presences: &[Presence], players: &[String], known: &[Vec<String>]) -> HashMap<String, u32> {
+    let mut parties: HashMap<&str, String> = presences
         .iter()
         .filter_map(|p| {
             let decoded = p.decode()?;
             (decoded.party_size > 1).then_some((p.puuid.as_str(), decoded.party_id?))
         })
         .collect();
-
+    for (index, group) in known.iter().enumerate() {
+        for puuid in group {
+            parties.insert(puuid.as_str(), format!("known-{index}"));
+        }
+    }
     let mut counts: HashMap<&str, u32> = HashMap::new();
     for puuid in players {
         if let Some(party) = parties.get(puuid.as_str()) {
@@ -355,7 +362,7 @@ mod tests {
             presence("e", json!({"partyId": "p3", "partySize": 3})),
         ];
         let players: Vec<String> = ["d", "a", "c", "e", "b"].map(String::from).to_vec();
-        let n = party_numbers(&presences, &players);
+        let n = party_numbers(&presences, &players, &[]);
         assert_eq!((n["d"], n["e"]), (1, 1));
         assert_eq!((n["a"], n["b"]), (2, 2));
         assert!(!n.contains_key("c"));
@@ -364,5 +371,16 @@ mod tests {
     #[test]
     fn party_members_include_self_without_presence() {
         assert_eq!(party_members(&[], "me"), vec!["me".to_string()]);
+    }
+
+    #[test]
+    fn party_api_members_are_grouped_without_presence() {
+        let presences = vec![presence("friend", json!({"partyId": "p9", "partySize": 2}))];
+        let players: Vec<String> = ["me", "stranger", "friend", "other"].iter().map(|s| s.to_string()).collect();
+        let known = vec![vec!["me".to_owned(), "stranger".to_owned()]];
+        let numbers = party_numbers(&presences, &players, &known);
+        assert_eq!(numbers.get("me"), Some(&1));
+        assert_eq!(numbers.get("stranger"), Some(&1));
+        assert_eq!(numbers.get("friend"), None, "1人だけの組には番号を振らない");
     }
 }
