@@ -127,6 +127,17 @@
           <select id="clip-hotkey"><option value="F8">F8</option><option value="F9">F9</option><option value="F10">F10</option><option value="Alt+F9">Alt + F9</option><option value="">使わない</option></select>
         </label>
       </div>
+      <div class="setting reaction-setting">
+        <span>
+          <b>キルの演出に使う画像</b>
+          <small>2K 以上の演出に、紙色の網点に刷り直して載せます。クリップの再生と共有用の書き出しの両方で使います。</small>
+        </span>
+        <img id="reaction-preview" class="reaction-preview" alt="選んだ画像" hidden>
+        <label class="tag reaction-pick">画像を選ぶ<input id="reaction-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></label>
+        <button id="reaction-clear" class="tag" type="button">画像を外す</button>
+        <button id="reaction-test" class="tag" type="button">演出を試す</button>
+        <p id="reaction-status" class="settings-note" role="status"></p>
+      </div>
       <p class="settings-note">録画はビデオフォルダの busters.gg に保存します。上限を超えると古い試合から消えますが、書き出したクリップは消えません。</p>
       <p id="recording-status" class="settings-note" role="status"></p>
     </section>
@@ -189,6 +200,7 @@
   <script src="alert.js"></script>
   <script src="desktop.js"></script>
   <script src="share_clip.js"></script>
+  <script src="reaction.js"></script>
   <script src="clips.js"></script>
   <script src="after_match.js"></script>
   <script src="window.js"></script>

@@ -298,8 +298,10 @@ async function buildClipOverlay(recording, clip, withName) {
     const row = drawFeedRow(size, event, kills, assets);
     layers.push(layer(row, W - row.width - 32 * size.u, H * 0.3 + index * 78 * size.u, event.at_ms, length - event.at_ms));
   });
+  layers.push(...(await reactionLayers(size, clip, layer)));
   const last = clip.events.at(-1);
-  if (last && (clip.kills >= 2 || clip.kind === "clutch")) {
+  // 2K 以上はキルの演出で見せるので、大きなスタンプはクラッチだけにする。
+  if (last && clip.kind === "clutch") {
     const stamp = drawStamp(size, scene.title, clip.kills >= 5);
     layers.push(layer(stamp, 48 * size.u, H * 0.34, last.at_ms + 150, Math.min(CLIP_STAMP_MS, length - last.at_ms)));
   }

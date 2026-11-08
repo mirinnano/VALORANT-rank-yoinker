@@ -793,3 +793,105 @@ dd { margin: 0; font-family: var(--mono); font-size: 14px; text-align: right; }
 }
 .invite-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .recruit .share-canvas { width: 100%; height: auto; }
+
+/* クリップのタイムライン */
+.clip-stage { position: relative; overflow: hidden; }
+.action-timeline { display: grid; gap: 12px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.action-timeline h3 { margin: 0; color: var(--mute); font-family: var(--mono); font-size: 12px; font-weight: 400; }
+.action-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.action-filters [aria-pressed="true"] { background: var(--paper); color: var(--ink); }
+.action-strip { position: relative; height: 48px; margin-top: 16px; background: var(--ink-2); border-top: 1px solid var(--line); }
+.strip-round { position: absolute; top: -16px; transform: translateX(-50%); color: var(--mute); font-family: var(--mono); font-size: 10px; }
+.strip-round::after { content: ""; position: absolute; left: 50%; top: 16px; width: 1px; height: 48px; background: var(--line); }
+.strip-tick { position: absolute; top: 12px; width: 6px; height: 24px; margin-left: -3px; padding: 0; border: 0; background: var(--mute); cursor: pointer; transition: transform 120ms var(--ease-out); }
+.strip-tick.is-own { top: 4px; height: 40px; background: var(--yellow); }
+.strip-tick.is-ally { background: var(--paper); }
+.strip-tick.is-enemy { background: var(--red); }
+.strip-tick.is-plant, .strip-tick.is-defuse { width: 10px; margin-left: -5px; border-radius: 50%; height: 10px; top: 19px; }
+@media (hover: hover) and (pointer: fine) {
+  .strip-tick:hover { transform: scaleY(1.25); }
+}
+.action-list { max-height: 360px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.action-round { padding: 12px 0 4px; color: var(--mute); font-family: var(--mono); font-size: 11px; }
+.action-pick { display: grid; grid-template-columns: 64px 24px minmax(0, 1fr) auto; gap: 8px; align-items: center; width: 100%; min-height: 36px; padding: 4px 8px; border: 0; border-left: 0; background: transparent; color: var(--paper); text-align: left; cursor: pointer; }
+.action-pick:hover { background: var(--ink-2); }
+.action.is-own .action-text { color: var(--yellow); font-weight: 700; }
+.action.is-enemy .action-text { color: var(--red); }
+.action-time, .action-weapon { color: var(--mute); font-family: var(--mono); font-size: 12px; }
+.action-dot { width: 24px; height: 24px; }
+.selection:not(:empty) { display: grid; gap: 8px; padding: 12px 16px; background: var(--ink-2); border-top: 2px solid var(--yellow); }
+.selection-range { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; font-family: var(--mono); }
+.selection-range b { font-size: 18px; }
+.selection-adjust, .selection-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* キルの演出「ミスプリント」。めったに起きない見せ場なので、ここだけは大きく動かす。動きは reaction.js。 */
+.reaction-layer { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; }
+.reaction-layer.is-floating { position: fixed; z-index: 50; }
+.rx { position: absolute; inset: 0; display: grid; }
+.rx-band {
+  position: relative; align-self: center; display: flex; align-items: stretch; width: 100%; margin-top: -2%;
+  background-color: rgb(11 11 12 / 88%);
+  background-image: radial-gradient(rgb(242 241 236 / 12%) 1.2px, transparent 1.4px);
+  background-size: 7px 7px;
+  border-block: 2px solid var(--paper);
+  padding-left: 6%;
+  transform: rotate(-4deg) scale(1.08);
+}
+.rx-l2 .rx-band { width: 70%; padding-left: 0; transform: rotate(-3deg); border-right: 2px solid var(--paper); }
+.rx-l5 .rx-band { background-color: rgb(255 42 26 / 94%); background-image: radial-gradient(rgb(11 11 12 / 25%) 1.2px, transparent 1.4px); }
+.rx-portrait { width: clamp(110px, 18vw, 230px); aspect-ratio: 1; object-fit: cover; border-right: 2px solid var(--paper); }
+.rx-copy { display: grid; align-content: center; gap: 6px; padding: 14px clamp(16px, 4vw, 48px); }
+.rx-print { position: relative; display: grid; font-family: var(--display); font-size: clamp(72px, 12vw, 170px); font-style: italic; font-weight: 900; line-height: 0.82; letter-spacing: -0.03em; }
+.rx-l2 .rx-print { font-size: clamp(56px, 8vw, 116px); }
+.rx-l5 .rx-print { font-size: clamp(96px, 16vw, 230px); }
+.rx-plate { grid-area: 1 / 1; }
+.rx-plate.is-yellow { color: var(--yellow); transform: translate(9px, 7px); mix-blend-mode: screen; }
+.rx-plate.is-red { color: var(--red); transform: translate(-5px, -4px); mix-blend-mode: screen; }
+.rx-plate.is-paper { color: var(--paper); }
+.rx-l5 .rx-plate.is-red { color: var(--ink); mix-blend-mode: normal; }
+.rx-line { margin: 0; color: var(--paper); font-family: var(--mono); font-size: clamp(12px, 1.4vw, 18px); }
+.rx-tally { display: flex; gap: 8px; }
+.rx-victim { position: relative; display: block; width: 40px; height: 40px; }
+.rx-tally { padding-top: 26px; gap: 14px; }
+.rx-face-icon { position: relative; display: block; width: 40px; height: 40px; transform-origin: 30% 80%; }
+.rx-hole { position: absolute; left: 52%; top: 62%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--ink); box-shadow: 0 0 0 2px var(--paper); opacity: 1; }
+.rx-victim.is-headshot .rx-hole { top: 30%; }
+.rx-skull { position: absolute; left: 50%; top: -28px; width: 26px; height: 26px; margin-left: -11px; fill: var(--red); filter: drop-shadow(2px 2px 0 var(--ink)); }
+.rx-skull .rx-skull-eye { fill: var(--ink); }
+.rx-l5 .rx-skull { fill: var(--paper); }
+.rx-tracer { position: absolute; top: 60%; right: 50%; width: 120px; height: 3px; margin-top: -1px; background: linear-gradient(90deg, transparent, var(--yellow) 70%, var(--paper)); transform-origin: right center; opacity: 0; }
+.rx-victim.is-headshot .rx-tracer { top: 30%; }
+.rx-impact { position: absolute; left: 52%; top: 62%; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%; border: 3px solid var(--paper); opacity: 0; }
+.rx-victim.is-headshot .rx-impact { top: 30%; }
+.rx-victim .agent-icon, .rx-victim .icon-blank { display: block; width: 40px; height: 40px; filter: grayscale(1) contrast(1.1); }
+.rx-victim.is-new .agent-icon { filter: none; }
+/* 斜線はアイコンの中心で回し、中心から両側へ伸ばす。 */
+.rx-strike { position: absolute; left: 50%; top: 20px; width: 54px; height: 5px; margin: -2.5px 0 0 -27px; background: var(--red); transform: rotate(-30deg); transform-origin: center; }
+.rx-l5 .rx-strike { background: var(--ink); }
+.rx-message { margin: 0; color: var(--paper); font-family: var(--display); font-size: clamp(15px, 1.9vw, 26px); font-weight: 700; line-height: 1.2; }
+.rx-message span { display: inline-block; }
+.rx-l5 .rx-message { color: var(--paper); }
+.rx-log {
+  align-self: end; justify-self: start; display: flex; align-items: center; gap: 18px; margin: 0 0 6% 3%; padding: 12px 22px 12px 16px;
+  background-color: rgb(11 11 12 / 88%);
+  background-image: radial-gradient(rgb(242 241 236 / 12%) 1.2px, transparent 1.4px);
+  background-size: 7px 7px;
+  border-block: 2px solid var(--paper);
+  transform: skewX(-8deg);
+}
+.rx-log > * { transform: skewX(8deg); }
+.rx-log .rx-tally { padding-top: 26px; }
+.rx-log-text { display: grid; gap: 4px; }
+.rx-log .rx-print { font-size: clamp(30px, 3.6vw, 52px); }
+
+.reaction-setting { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.reaction-preview { width: 96px; height: 96px; object-fit: contain; background: var(--ink-2); }
+.reaction-pick { position: relative; overflow: hidden; display: inline-flex; width: fit-content; cursor: pointer; }
+.reaction-pick input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.reaction-setting .tag { width: fit-content; }
+/* 低い画面では、固定した動画がタイムラインを隠すので固定しない。 */
+@media (max-height: 820px) {
+  .clip-player { position: static; }
+}
+.strip-selection { position: absolute; top: 0; bottom: 0; min-width: 4px; background: rgb(255 225 0 / 22%); border-inline: 2px solid var(--yellow); pointer-events: none; }
+.rx-flash { position: absolute; inset: 0; background: var(--paper); opacity: 0; }

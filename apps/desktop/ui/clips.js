@@ -1,5 +1,9 @@
 // 録画から切り出したクリップの一覧と再生。
-const clipState = { playing: null, stopAt: null };
+const clipState = { playing: null, stopAt: null, selection: null, filter: "all" };
+/** タイムラインで出来事を選んだときの、前後に含める時間。 */
+const PICK_BEFORE_MS = 6_000;
+const PICK_AFTER_MS = 3_000;
+const NUDGE_MS = 1_000;
 
 function formatClipLength(ms) {
   const seconds = Math.round(ms / 1000);
@@ -26,28 +30,38 @@ function clipPlayer() {
   });
   const caption = element("p", "clip-caption", "クリップを選ぶと、ここで再生します。");
   caption.id = "clip-caption";
-  wrap.append(video, caption);
+  const stage = element("div", "clip-stage");
+  stage.append(video);
+  wrap.append(stage, caption);
   return wrap;
 }
 
-function playClip(recording, clip) {
+/** 録画を `fromMs` から再生する。`stopMs` で止め、`kills`（自分のキル）の瞬間に演出を出す。 */
+function playRange(recording, fromMs, stopMs, kills, caption) {
   const video = document.getElementById("clip-video");
-  const source = window.__TAURI__.core.convertFileSrc(recording.path);
-  const start = clip.start_ms / 1000;
   const begin = () => {
-    video.currentTime = start;
-    clipState.stopAt = clip.end_ms / 1000;
+    video.currentTime = Math.max(fromMs, 0) / 1000;
+    clipState.stopAt = stopMs === null ? null : stopMs / 1000;
+    watchReactions(video, kills);
     video.play().catch(() => {});
   };
-  document.getElementById("clip-caption").textContent =
-    `${recording.map ?? "試合"}　${clip.round ? `第${clip.round}ラウンド　` : ""}${clip.title}`;
+  document.getElementById("clip-caption").textContent = caption;
   if (clipState.playing !== recording.path) {
     clipState.playing = recording.path;
-    video.src = source;
+    video.src = window.__TAURI__.core.convertFileSrc(recording.path);
     video.addEventListener("loadedmetadata", begin, { once: true });
   } else {
     begin();
   }
+  document.querySelector(".clip-player")?.scrollIntoView({ block: "nearest" });
+}
+
+function playClip(recording, clip) {
+  const kills = clip.events
+    .filter((event) => event.kind === "kill")
+    .map((event) => ({ at_ms: clip.start_ms + event.at_ms, victim: event.victim, weapon: event.weapon, round: clip.round, headshot: event.headshot }));
+  const caption = `${recording.map ?? "試合"}　${clip.round ? `第${clip.round}ラウンド　` : ""}${clip.title}`;
+  playRange(recording, clip.start_ms, clip.end_ms, kills, caption);
 }
 
 function clipRow(recording, clip) {
@@ -138,6 +152,12 @@ function recordingBlock(recording) {
     list.append(...clips.map((clip) => clipRow(recording, clip)));
     block.append(list);
   }
+  if (recording.exists && recording.match_id) {
+    const timeline = element("section", "action-timeline");
+    timeline.append(element("p", "clip-meta", "出来事を読み込んでいます…"));
+    block.append(timeline);
+    fillTimeline(timeline, recording);
+  }
   return block;
 }
 
@@ -169,3 +189,203 @@ window.__TAURI__.event.listen("clip-marked", ({ payload }) => {
     badge.textContent = `場面を保存（${payload}）`;
   }
 });
+
+// タイムライン。録画に映っている全員の出来事を並べ、選んだ範囲を書き出す。
+const ACTION_SIDE_LABEL = { own: "あなた", ally: "味方", enemy: "相手" };
+const ACTION_FILTERS = [["all", "全員"], ["own", "自分"], ["kill", "キルだけ"]];
+
+function formatVideoTime(ms) {
+  const total = Math.max(ms, 0) / 1000;
+  const minutes = Math.floor(total / 60);
+  return `${minutes}:${(total % 60).toFixed(1).padStart(4, "0")}`;
+}
+
+function actionText(action) {
+  const who = action.actor ?? ACTION_SIDE_LABEL[action.actor_side] ?? "不明";
+  if (action.kind === "plant") return `${who} が設置`;
+  if (action.kind === "defuse") return `${who} が解除`;
+  return `${who} → ${action.target ?? "不明"}`;
+}
+
+function visibleActions(actions) {
+  if (clipState.filter === "own") {
+    return actions.filter((action) => action.actor_side === "own" || action.target_side === "own");
+  }
+  if (clipState.filter === "kill") return actions.filter((action) => action.kind === "kill");
+  return actions;
+}
+
+/** 範囲の中の自分のキル。演出に使う。 */
+function ownKills(actions, from, to) {
+  return actions
+    .filter((action) => action.kind === "kill" && action.actor_side === "own" && action.at_ms >= from && action.at_ms <= to)
+    .map((action) => ({ at_ms: action.at_ms, victim: action.target, weapon: action.weapon, round: action.round, headshot: action.headshot }));
+}
+
+function choose(recording, actions, action) {
+  clipState.selection = {
+    recordingId: recording.id,
+    round: action.round,
+    start: Math.max(action.at_ms - PICK_BEFORE_MS, 0),
+    end: Math.min(action.at_ms + PICK_AFTER_MS, recording.length_ms),
+  };
+  renderSelection(recording, actions);
+  const { start, end } = clipState.selection;
+  playRange(recording, start, end, ownKills(actions, start, end), `第${action.round}ラウンド　${actionText(action)}`);
+}
+
+function actionStrip(recording, actions) {
+  const strip = element("div", "action-strip");
+  strip.setAttribute("role", "group");
+  strip.setAttribute("aria-label", "録画の中の出来事の位置");
+  const rounds = new Map();
+  for (const action of actions) if (!rounds.has(action.round)) rounds.set(action.round, action.at_ms);
+  for (const [round, at] of rounds) {
+    const mark = element("span", "strip-round", `R${round}`);
+    mark.style.left = `${(at / recording.length_ms) * 100}%`;
+    strip.append(mark);
+  }
+  for (const action of visibleActions(actions)) {
+    const tick = element("button", `strip-tick is-${action.actor_side ?? "none"} is-${action.kind}`);
+    tick.type = "button";
+    tick.style.left = `${(action.at_ms / recording.length_ms) * 100}%`;
+    tick.title = `${formatVideoTime(action.at_ms)}　${actionText(action)}`;
+    tick.setAttribute("aria-label", tick.title);
+    tick.addEventListener("click", () => choose(recording, actions, action));
+    strip.append(tick);
+  }
+  return strip;
+}
+
+function actionList(recording, actions) {
+  const list = element("ol", "action-list");
+  let round = null;
+  for (const action of visibleActions(actions)) {
+    if (action.round !== round) {
+      round = action.round;
+      list.append(element("li", "action-round", `ROUND ${round}`));
+    }
+    const item = element("li", `action is-${action.actor_side ?? "none"} is-${action.kind}`);
+    const pick = element("button", "action-pick");
+    pick.type = "button";
+    pick.append(
+      element("span", "action-time", formatVideoTime(action.at_ms)),
+      action.actor ? agentIcon(action.actor, 24) : element("span", "action-dot"),
+      element("span", "action-text", actionText(action)),
+      element("span", "action-weapon", action.weapon ?? ""),
+    );
+    pick.addEventListener("click", () => choose(recording, actions, action));
+    item.append(pick);
+    list.append(item);
+  }
+  return list;
+}
+
+function renderTimeline(box, recording, actions) {
+  const filters = element("div", "action-filters");
+  for (const [key, label] of ACTION_FILTERS) {
+    const button = element("button", "tag", label);
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(clipState.filter === key));
+    button.addEventListener("click", () => {
+      clipState.filter = key;
+      renderTimeline(box, recording, actions);
+    });
+    filters.append(button);
+  }
+  const selection = element("div", "selection");
+  selection.id = `selection-${recording.id}`;
+  box.replaceChildren(
+    element("h3", "", "TIMELINE / 全員の出来事"),
+    filters,
+    actionStrip(recording, actions),
+    selection,
+    actionList(recording, actions),
+  );
+  if (clipState.selection?.recordingId === recording.id) renderSelection(recording, actions);
+}
+
+/** 選んだ範囲の調整と書き出し。 */
+function renderSelection(recording, actions) {
+  const box = document.getElementById(`selection-${recording.id}`);
+  const chosen = clipState.selection;
+  if (!box || !chosen || chosen.recordingId !== recording.id) return;
+  const length = chosen.end - chosen.start;
+  // 帯の上にも、選んだ範囲を示す。
+  const strip = box.parentElement?.querySelector(".action-strip");
+  if (strip) {
+    const band = strip.querySelector(".strip-selection") ?? element("span", "strip-selection");
+    band.style.left = `${(chosen.start / recording.length_ms) * 100}%`;
+    band.style.width = `${(length / recording.length_ms) * 100}%`;
+    strip.prepend(band);
+  }
+  const status = element("span", "clip-meta");
+  status.setAttribute("role", "status");
+  const nudge = (key, delta) => () => {
+    const next = { ...chosen, [key]: Math.min(Math.max(chosen[key] + delta, 0), recording.length_ms) };
+    if (next.end - next.start < NUDGE_MS) return;
+    clipState.selection = next;
+    renderSelection(recording, actions);
+  };
+  const button = (label, className, action) => {
+    const node = element("button", className, label);
+    node.type = "button";
+    node.addEventListener("click", action);
+    return node;
+  };
+  const ownKills = ownKills(actions, chosen.start, chosen.end);
+  const range = element("div", "selection-range");
+  range.append(
+    element("b", "", `${formatVideoTime(chosen.start)} – ${formatVideoTime(chosen.end)}`),
+    element("span", "clip-meta", `${formatClipLength(length)}　自分のキル ${ownKills.length}`),
+  );
+  const adjust = element("div", "selection-adjust");
+  adjust.append(
+    button("開始 −1秒", "tag", nudge("start", -NUDGE_MS)),
+    button("開始 +1秒", "tag", nudge("start", NUDGE_MS)),
+    button("終了 −1秒", "tag", nudge("end", -NUDGE_MS)),
+    button("終了 +1秒", "tag", nudge("end", NUDGE_MS)),
+    button("この範囲を再生", "tag", () => playRange(recording, chosen.start, chosen.end, ownKills, "選んだ範囲")),
+  );
+  const create = () =>
+    invoke("create_clip", {
+      recordingId: recording.id, round: chosen.round ?? null, startMs: chosen.start, endMs: chosen.end, title: "",
+    });
+  const plain = button("MP4 に書き出す", "tag", async () => {
+    plain.disabled = true;
+    status.textContent = "書き出しています…";
+    try {
+      const clip = await create();
+      const path = await invoke("export_clip", { clipId: clip.id });
+      status.textContent = `保存先: ${path}`;
+    } catch (error) {
+      status.textContent = `書き出せませんでした: ${error}`;
+    } finally {
+      plain.disabled = false;
+    }
+  });
+  const share = button("共有用に書き出す", "primary", async () => {
+    try {
+      const clip = await create();
+      await exportShareClip(recording, clip, share, status);
+    } catch (error) {
+      status.textContent = `書き出せませんでした: ${error}`;
+    }
+  });
+  const actionsRow = element("div", "selection-actions");
+  actionsRow.append(share, plain, status);
+  box.replaceChildren(range, adjust, actionsRow);
+}
+
+async function fillTimeline(box, recording) {
+  try {
+    const actions = await invoke("recording_actions", { id: recording.id });
+    if (actions.length === 0) {
+      box.replaceChildren(element("p", "clip-meta", "試合の結果が届くと、全員の出来事がここに並びます。"));
+      return;
+    }
+    renderTimeline(box, recording, actions);
+  } catch (error) {
+    box.replaceChildren(element("p", "clip-meta", `出来事を読み込めませんでした: ${error}`));
+  }
+}

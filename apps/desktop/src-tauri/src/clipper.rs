@@ -29,6 +29,9 @@ struct Session {
     mode: Option<String>,
     /// ホットキーを押した時刻。
     marks: Vec<i64>,
+    /// スコアが増えた時刻。終わったラウンドの番号と組にする。録画と試合詳細の時刻合わせに使う。
+    round_ends: Vec<(u32, i64)>,
+    last_rounds: u32,
 }
 
 pub struct Clipper {
@@ -71,7 +74,16 @@ pub fn on_event(app: &AppHandle, event: &AppEvent) {
     match in_game {
         Some(Some(snapshot)) if !closed => {
             let mut session = clipper.session.lock().expect("clip session poisoned");
-            if session.is_some() || !settings.enabled {
+            if let Some(active) = session.as_mut() {
+                // スコアが増えたら、そのラウンドが終わった時刻として残す。
+                let played = snapshot.score.map_or(0, |(own, enemy)| own + enemy);
+                if played > active.last_rounds {
+                    active.last_rounds = played;
+                    active.round_ends.push((played, recorder::current_ms()));
+                }
+                return;
+            }
+            if !settings.enabled {
                 return;
             }
             let mut last = clipper.last_attempt.lock().expect("clip attempt poisoned");
@@ -96,6 +108,9 @@ pub fn on_event(app: &AppHandle, event: &AppEvent) {
                         map: snapshot.map.clone(),
                         mode: snapshot.mode.clone(),
                         marks: Vec::new(),
+                        round_ends: Vec::new(),
+                        // 試合の途中から録画を始めたときは、そこまでのラウンドを数えない。
+                        last_rounds: snapshot.score.map_or(0, |(own, enemy)| own + enemy),
                     });
                     let _ = app.emit(CLIPS_EVENT, ());
                 }
@@ -112,7 +127,7 @@ pub fn on_event(app: &AppHandle, event: &AppEvent) {
 fn finish(app: AppHandle) {
     let Some(session) = app.state::<Clipper>().session.lock().expect("clip session poisoned").take() else { return };
     tauri::async_runtime::spawn(async move {
-        let Session { recorder, match_id, map, mode, marks } = session;
+        let Session { recorder, match_id, map, mode, marks, round_ends, .. } = session;
         let finished = match tauri::async_runtime::spawn_blocking(move || recorder.stop()).await {
             Ok(Ok(finished)) => finished,
             Ok(Err(error)) => {
@@ -155,18 +170,18 @@ fn finish(app: AppHandle) {
         prune(&app);
         let _ = app.emit(CLIPS_EVENT, ());
         if let Some(match_id) = match_id {
-            plan_when_ready(app, recording, match_id).await;
+            plan_when_ready(app, recording, match_id, round_ends).await;
         }
     });
 }
 
 /// 試合詳細が出るのを待って、見せ場のクリップを作る。
-async fn plan_when_ready(app: AppHandle, recording: Recording, match_id: String) {
+async fn plan_when_ready(app: AppHandle, recording: Recording, match_id: String, round_ends: Vec<(u32, i64)>) {
     for attempt in 0..PLAN_ATTEMPTS {
         if attempt > 0 {
             tokio::time::sleep(PLAN_INTERVAL).await;
         }
-        match plan_once(&app, &recording, &match_id).await {
+        match plan_once(&app, &recording, &match_id, &round_ends).await {
             Ok(true) => return,
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "クリップの作成に失敗"),
@@ -174,19 +189,25 @@ async fn plan_when_ready(app: AppHandle, recording: Recording, match_id: String)
     }
 }
 
-/// 試合詳細があればクリップを作って `true` を返す。
-async fn plan_once(app: &AppHandle, recording: &Recording, match_id: &str) -> Result<bool, String> {
+/// 試合詳細があればクリップを作って `true` を返す。`round_ends` があれば、それで
+/// 録画と試合詳細の時刻を自動で合わせてから切り出す。
+async fn plan_once(app: &AppHandle, recording: &Recording, match_id: &str, round_ends: &[(u32, i64)]) -> Result<bool, String> {
     let source = app.state::<AppState>().source.clone();
     let own = source.own_puuid().await.map_err(|error| error.to_string())?;
     let Some(details) = source.match_details(match_id).await.map_err(|error| error.to_string())? else {
         return Ok(false);
     };
     let catalog = source.catalog().await.map_err(|error| error.to_string())?;
-    let placed: Vec<_> = clips::plan(&details, &own, &catalog)
-        .into_iter()
-        .filter_map(|plan| clips::place(&plan, recording, true).map(|at| (plan, at)))
-        .collect();
-    open_store(app)?.add_clips(recording.id, &placed).map_err(|error| error.to_string())?;
+    let store = open_store(app)?;
+    let mut recording = recording.clone();
+    if let Some(offset) = clips::estimate_offset(&details, round_ends) {
+        tracing::info!(offset, "録画の時刻を合わせた");
+        recording.offset_ms = offset;
+        store.set_recording_offset(recording.id, offset).map_err(|error| error.to_string())?;
+    }
+    let placed: Vec<_> =
+        clips::plan(&details, &own, &catalog).into_iter().filter_map(|plan| clips::fit(plan, &recording, true)).collect();
+    store.add_clips(recording.id, &placed).map_err(|error| error.to_string())?;
     let _ = app.emit(CLIPS_EVENT, ());
     Ok(true)
 }
@@ -265,7 +286,7 @@ pub async fn set_recording_offset(app: AppHandle, id: i64, offset_ms: i64) -> Re
     store.clear_planned_clips(id).map_err(|error| error.to_string())?;
     let recording = store.recording(id).map_err(|error| error.to_string())?.ok_or("録画が見つかりません")?;
     if let Some(match_id) = recording.match_id.clone() {
-        plan_once(&app, &recording, &match_id).await?;
+        plan_once(&app, &recording, &match_id, &[]).await?;
     }
     Ok(())
 }
@@ -288,6 +309,53 @@ pub async fn export_clip(app: AppHandle, clip_id: i64) -> Result<String, String>
     let text = path.display().to_string();
     store.set_clip_exported(clip_id, &text).map_err(|error| error.to_string())?;
     Ok(text)
+}
+
+/// 録画に映っている、試合の全員の出来事。時刻は録画の先頭からのミリ秒。
+#[tauri::command]
+pub async fn recording_actions(app: AppHandle, id: i64) -> Result<Vec<clips::MatchAction>, String> {
+    let recording = open_store(&app)?.recording(id).map_err(|error| error.to_string())?.ok_or("録画が見つかりません")?;
+    actions_of(&app, &recording).await
+}
+
+async fn actions_of(app: &AppHandle, recording: &Recording) -> Result<Vec<clips::MatchAction>, String> {
+    let Some(match_id) = recording.match_id.clone() else { return Ok(Vec::new()) };
+    let source = app.state::<AppState>().source.clone();
+    let own = source.own_puuid().await.map_err(|error| error.to_string())?;
+    let Some(details) = source.match_details(&match_id).await.map_err(|error| error.to_string())? else {
+        return Ok(Vec::new());
+    };
+    let catalog = source.catalog().await.map_err(|error| error.to_string())?;
+    Ok(clips::place_actions(clips::match_actions(&details, &own, &catalog), recording))
+}
+
+/// 画面で選んだ範囲をクリップとして残し、そのクリップを返す。書き出しは別に呼ぶ。
+#[tauri::command]
+pub async fn create_clip(
+    app: AppHandle,
+    recording_id: i64,
+    round: Option<u32>,
+    start_ms: i64,
+    end_ms: i64,
+    title: String,
+) -> Result<Clip, String> {
+    let store = open_store(&app)?;
+    let recording =
+        store.recording(recording_id).map_err(|error| error.to_string())?.ok_or("録画が見つかりません")?;
+    let title: String = title.trim().chars().take(40).collect();
+    // 試合詳細が取れなくても、見せ場なしでクリップは作る。
+    let actions = actions_of(&app, &recording).await.unwrap_or_default();
+    let chosen =
+        clips::chosen(&recording, round, start_ms, end_ms, &title, &actions).ok_or("1 秒以上の範囲を選んでください")?;
+    let start = chosen.1.start_ms;
+    store.add_clips(recording_id, &[chosen]).map_err(|error| error.to_string())?;
+    let _ = app.emit(CLIPS_EVENT, ());
+    store
+        .clips(recording_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|clip| clip.kind == clips::ClipKind::Manual && clip.start_ms == start)
+        .ok_or_else(|| "クリップを保存できませんでした".to_owned())
 }
 
 #[tauri::command]

@@ -70,6 +70,9 @@ pub struct ClipEvent {
     pub weapon: Option<String>,
     /// 倒した相手のエージェント。名前は持たない。
     pub victim: Option<String>,
+    /// 確実にヘッドショットで倒したか。古い記録には無いので、無ければ偽。
+    #[serde(default)]
+    pub headshot: bool,
 }
 
 /// 切り出す範囲。時刻はすべて手元の時計のエポックミリ秒。
@@ -95,6 +98,22 @@ fn list<'a>(value: &'a Value, key: &str) -> &'a [Value] {
 
 fn game_time(event: &Value) -> Option<i64> {
     event.get("timeSinceGameStartMillis").or_else(|| event.get("gameTime")).and_then(Value::as_i64)
+}
+
+/// そのラウンドで、倒した人が相手に当てた弾がすべて頭だったか。キルごとの部位は
+/// 試合詳細に無いので、頭だけに当てていたときだけヘッドショットとみなす。
+fn headshot_kill(round: &Value, kill: &Value) -> bool {
+    let (Some(killer), Some(victim)) = (text(kill, "killer"), text(kill, "victim")) else { return false };
+    let count = |damage: &Value, key| damage.get(key).and_then(Value::as_i64).unwrap_or(0);
+    let mut head = 0;
+    let mut other = 0;
+    for player in list(round, "playerStats").iter().filter(|p| text(p, "subject") == Some(killer)) {
+        for damage in list(player, "damage").iter().filter(|d| text(d, "receiver") == Some(victim)) {
+            head += count(damage, "headshots");
+            other += count(damage, "bodyshots") + count(damage, "legshots");
+        }
+    }
+    head > 0 && other == 0
 }
 
 fn round_time(event: &Value) -> Option<i64> {
@@ -126,15 +145,16 @@ pub fn plan(details: &Value, own: &str, catalog: &GameCatalog) -> Vec<ClipPlan> 
         .iter()
         .filter_map(|p| Some((text(p, "subject")?, catalog.agents.get(&text(p, "characterId")?.to_lowercase())?.clone())))
         .collect();
-    let kill_event = |kill: &Value| -> Option<ClipEvent> {
+    let kill_event = |round: &Value, kill: &Value| -> Option<ClipEvent> {
         Some(ClipEvent {
             at_ms: game_start + game_time(kill)?,
             kind: EventKind::Kill,
             weapon: crate::review::weapon_name(kill, catalog),
             victim: text(kill, "victim").and_then(|v| agents.get(v)).cloned(),
+            headshot: headshot_kill(round, kill),
         })
     };
-    let defuse_event = |at_ms| ClipEvent { at_ms, kind: EventKind::Defuse, weapon: None, victim: None };
+    let defuse_event = |at_ms| ClipEvent { at_ms, kind: EventKind::Defuse, weapon: None, victim: None, headshot: false };
 
     let mut plans = Vec::new();
     for (index, round) in list(details, "roundResults").iter().enumerate() {
@@ -159,7 +179,7 @@ pub fn plan(details: &Value, own: &str, catalog: &GameCatalog) -> Vec<ClipPlan> 
                     end_ms: game_start + last + TAIL_MS,
                     kills: times.len() as u32,
                     title: streak_title(times.len() as u32),
-                    events: streak.iter().filter_map(|kill| kill_event(kill)).collect(),
+                    events: streak.iter().filter_map(|kill| kill_event(round, kill)).collect(),
                 });
             }
             streak.clear();
@@ -194,7 +214,7 @@ pub fn plan(details: &Value, own: &str, catalog: &GameCatalog) -> Vec<ClipPlan> 
             let mut events: Vec<ClipEvent> = own_kills
                 .iter()
                 .filter(|kill| game_time(kill).is_some_and(|t| t >= alone_from))
-                .filter_map(|kill| kill_event(kill))
+                .filter_map(|kill| kill_event(round, kill))
                 .collect();
             events.extend(defuse.map(|d| defuse_event(game_start + d)));
             plans.push(ClipPlan {
@@ -223,6 +243,211 @@ pub fn plan(details: &Value, own: &str, catalog: &GameCatalog) -> Vec<ClipPlan> 
         }
     }
     plans
+}
+
+/// 自動で時刻を合わせるのに要る、終了時刻を比べられたラウンドの数。
+const MIN_SYNC_ROUNDS: usize = 3;
+
+/// 試合詳細から、終了時刻がはっきりしているラウンドの終わりを Riot 側の時刻で返す。
+/// 全滅で終わったラウンドは最後のキル、解除で終わったラウンドは解除の瞬間。
+/// 番号は 1 始まり。
+pub fn round_ends(details: &Value) -> Vec<(u32, i64)> {
+    let Some(game_start) = details.pointer("/matchInfo/gameStartMillis").and_then(Value::as_i64) else {
+        return Vec::new();
+    };
+    list(details, "roundResults")
+        .iter()
+        .enumerate()
+        .filter_map(|(index, round)| {
+            let kills: Vec<&Value> = list(round, "playerStats").iter().flat_map(|p| list(p, "kills")).collect();
+            let end = match text(round, "roundResult") {
+                Some("Eliminated") => kills.iter().filter_map(|kill| game_time(kill)).max()?,
+                Some("Bomb defused") => {
+                    let start = kills.iter().find_map(|kill| Some(game_time(kill)? - round_time(kill)?))?;
+                    start + round.get("defuseRoundTime")?.as_i64()?
+                }
+                _ => return None,
+            };
+            Some((index as u32 + 1, game_start + end))
+        })
+        .collect()
+}
+
+/// 試合中に手元で見たラウンドの終わり `marks` と、試合詳細の終わりを比べて、Riot 側の
+/// 時刻へ足す値を求める。外れ値に引きずられないよう中央値を使う。比べられるラウンドが
+/// 少なければ `None`。手元の終わりは、スコアの更新を受け取った時刻。
+pub fn estimate_offset(details: &Value, marks: &[(u32, i64)]) -> Option<i64> {
+    let local: HashMap<u32, i64> = marks.iter().copied().collect();
+    let mut deltas: Vec<i64> =
+        round_ends(details).into_iter().filter_map(|(round, riot)| Some(local.get(&round)? - riot)).collect();
+    if deltas.len() < MIN_SYNC_ROUNDS {
+        return None;
+    }
+    deltas.sort_unstable();
+    Some(deltas[deltas.len() / 2])
+}
+
+/// 試合の中の出来事の種類。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionKind {
+    Kill,
+    Plant,
+    Defuse,
+}
+
+/// 出来事をした人と自分の関係。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionSide {
+    Own,
+    Ally,
+    Enemy,
+}
+
+/// 試合の全員の出来事。名前は持たず、エージェントだけを持つ。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MatchAction {
+    /// Riot 側のエポックミリ秒。録画に合わせると、録画の先頭からのミリ秒になる。
+    pub at_ms: i64,
+    pub round: u32,
+    pub kind: ActionKind,
+    pub actor: Option<String>,
+    pub actor_side: Option<ActionSide>,
+    pub target: Option<String>,
+    pub target_side: Option<ActionSide>,
+    pub weapon: Option<String>,
+    /// 確実にヘッドショットで倒したか。キル以外は偽。
+    pub headshot: bool,
+}
+
+/// 試合詳細から、全員のキル、設置、解除を時刻順に並べる。
+pub fn match_actions(details: &Value, own: &str, catalog: &GameCatalog) -> Vec<MatchAction> {
+    let Some(game_start) = details.pointer("/matchInfo/gameStartMillis").and_then(Value::as_i64) else {
+        return Vec::new();
+    };
+    let players = list(details, "players");
+    let team = players.iter().find(|p| text(p, "subject") == Some(own)).and_then(|p| text(p, "teamId"));
+    let team_of: HashMap<&str, &str> =
+        players.iter().filter_map(|p| Some((text(p, "subject")?, text(p, "teamId")?))).collect();
+    let agents: HashMap<&str, String> = players
+        .iter()
+        .filter_map(|p| Some((text(p, "subject")?, catalog.agents.get(&text(p, "characterId")?.to_lowercase())?.clone())))
+        .collect();
+    let side = |puuid: Option<&str>| -> Option<ActionSide> {
+        let puuid = puuid?;
+        Some(if puuid == own {
+            ActionSide::Own
+        } else if team.is_some() && team_of.get(puuid).copied() == team {
+            ActionSide::Ally
+        } else {
+            ActionSide::Enemy
+        })
+    };
+    let agent = |puuid: Option<&str>| puuid.and_then(|id| agents.get(id)).cloned();
+
+    let mut actions = Vec::new();
+    for (index, round) in list(details, "roundResults").iter().enumerate() {
+        let number = index as u32 + 1;
+        let kills: Vec<&Value> = list(round, "playerStats").iter().flat_map(|p| list(p, "kills")).collect();
+        let round_start = kills.iter().find_map(|kill| Some(game_time(kill)? - round_time(kill)?));
+        for kill in &kills {
+            let Some(at) = game_time(kill) else { continue };
+            let (killer, victim) = (text(kill, "killer"), text(kill, "victim"));
+            actions.push(MatchAction {
+                at_ms: game_start + at,
+                round: number,
+                kind: ActionKind::Kill,
+                actor: agent(killer),
+                actor_side: side(killer),
+                target: agent(victim),
+                target_side: side(victim),
+                weapon: crate::review::weapon_name(kill, catalog),
+                headshot: headshot_kill(round, kill),
+            });
+        }
+        let Some(start) = round_start else { continue };
+        for (kind, time_key, who_key) in
+            [(ActionKind::Plant, "plantRoundTime", "bombPlanter"), (ActionKind::Defuse, "defuseRoundTime", "bombDefuser")]
+        {
+            let Some(at) = round.get(time_key).and_then(Value::as_i64).filter(|at| *at > 0) else { continue };
+            let who = text(round, who_key).filter(|id| !id.is_empty());
+            actions.push(MatchAction {
+                at_ms: game_start + start + at,
+                round: number,
+                kind,
+                actor: agent(who),
+                actor_side: side(who),
+                target: None,
+                target_side: None,
+                weapon: None,
+                headshot: false,
+            });
+        }
+    }
+    actions.sort_by_key(|action| action.at_ms);
+    actions
+}
+
+/// 録画の中の位置に直す。録画の外の出来事は除く。
+pub fn place_actions(actions: Vec<MatchAction>, recording: &Recording) -> Vec<MatchAction> {
+    actions
+        .into_iter()
+        .map(|action| MatchAction { at_ms: action.at_ms + recording.offset_ms - recording.started_ms, ..action })
+        .filter(|action| (0..=recording.length_ms).contains(&action.at_ms))
+        .collect()
+}
+
+/// 画面で選んだ範囲を、ホットキーと同じ手動のクリップにする。範囲は録画の先頭からのミリ秒。
+/// `actions` は [`place_actions`] で録画に合わせたもの。範囲の中の自分のキルと解除を
+/// 見せ場にする。`title` が空なら、キルの数から付ける。
+pub fn chosen(
+    recording: &Recording,
+    round: Option<u32>,
+    start_ms: i64,
+    end_ms: i64,
+    title: &str,
+    actions: &[MatchAction],
+) -> Option<(ClipPlan, Placement)> {
+    let start = start_ms.max(0);
+    let end = end_ms.min(recording.length_ms);
+    if end - start < 1_000 {
+        return None;
+    }
+    let events: Vec<ClipEvent> = actions
+        .iter()
+        .filter(|action| action.actor_side == Some(ActionSide::Own) && (start..=end).contains(&action.at_ms))
+        .filter_map(|action| {
+            let kind = match action.kind {
+                ActionKind::Kill => EventKind::Kill,
+                ActionKind::Defuse => EventKind::Defuse,
+                ActionKind::Plant => return None,
+            };
+            Some(ClipEvent {
+                at_ms: action.at_ms - start,
+                kind,
+                weapon: action.weapon.clone(),
+                victim: action.target.clone(),
+                headshot: action.headshot,
+            })
+        })
+        .collect();
+    let kills = events.iter().filter(|event| event.kind == EventKind::Kill).count() as u32;
+    let title = match title.trim() {
+        "" if kills > 0 => streak_title(kills),
+        "" => "選んだ場面".to_owned(),
+        text => text.to_owned(),
+    };
+    let plan = ClipPlan {
+        kind: ClipKind::Manual,
+        round,
+        start_ms: recording.started_ms + start,
+        end_ms: recording.started_ms + end,
+        kills,
+        title,
+        events: events.clone(),
+    };
+    Some((plan, Placement { start_ms: start, end_ms: end, events }))
 }
 
 /// ホットキーを押した時刻から、残す範囲を作る。
@@ -295,6 +520,22 @@ pub fn place(plan: &ClipPlan, recording: &Recording, riot_clock: bool) -> Option
         .filter(|event| (0..=end - start).contains(&event.at_ms))
         .collect();
     (end - start >= 1_000).then_some(Placement { start_ms: start, end_ms: end, events })
+}
+
+/// [`place`] に加えて、キルの数と題を録画に映っている分だけで数え直す。録画の始まる
+/// 前のキルまで数えると、映っていない 2K が出てしまう。映るキルが無くなった
+/// キルのクリップは作らない。
+pub fn fit(mut plan: ClipPlan, recording: &Recording, riot_clock: bool) -> Option<(ClipPlan, Placement)> {
+    let at = place(&plan, recording, riot_clock)?;
+    if plan.kind == ClipKind::Kills {
+        let kills = at.events.iter().filter(|event| event.kind == EventKind::Kill).count() as u32;
+        if kills == 0 {
+            return None;
+        }
+        plan.kills = kills;
+        plan.title = streak_title(kills);
+    }
+    Some((plan, at))
 }
 
 /// 容量の上限を超えた古い録画を選ぶ。新しい `keep` 本と、上限内に収まる分は残す。
@@ -390,7 +631,7 @@ mod tests {
         let mut rec = recording(1, 1_000, 0);
         let plan = ClipPlan {
             kind: ClipKind::Kills, round: Some(1), start_ms: 500, end_ms: 9_000, kills: 1, title: String::new(),
-            events: [6_000, 50_000].map(|at_ms| ClipEvent { at_ms, kind: EventKind::Kill, weapon: None, victim: None }).to_vec(),
+            events: [6_000, 50_000].map(|at_ms| ClipEvent { at_ms, kind: EventKind::Kill, weapon: None, victim: None, headshot: false }).to_vec(),
         };
         let times = |p: Option<Placement>| p.unwrap().events.iter().map(|e| e.at_ms).collect::<Vec<_>>();
         let at = |p: Option<Placement>| p.map(|p| (p.start_ms, p.end_ms));
@@ -424,5 +665,119 @@ mod tests {
         data["players"][2]["characterId"] = json!("A-JETT");
         let event = &plan(&data, "me", &catalog)[0].events[0];
         assert_eq!((event.weapon.as_deref(), event.victim.as_deref()), (Some("Vandal"), Some("Jett")));
+    }
+
+    fn synced_match() -> Value {
+        let kill = |killer: &str, victim: &str, game: i64, round: i64| {
+            json!({"killer": killer, "victim": victim, "timeSinceGameStartMillis": game, "timeSinceRoundStartMillis": round})
+        };
+        json!({
+            "matchInfo": {"gameStartMillis": 1_000_000},
+            "players": [
+                {"subject": "me", "teamId": "Blue", "characterId": "jett"},
+                {"subject": "mate", "teamId": "Blue", "characterId": "sova"},
+                {"subject": "foe", "teamId": "Red", "characterId": "omen"}
+            ],
+            "roundResults": [
+                {"roundResult": "Eliminated", "playerStats": [{"kills": [kill("me", "foe", 50_000, 20_000), kill("me", "foe", 60_000, 30_000)]}]},
+                {"roundResult": "Bomb defused", "defuseRoundTime": 70_000, "bombDefuser": "mate", "plantRoundTime": 40_000, "bombPlanter": "foe",
+                 "playerStats": [{"kills": [kill("foe", "mate", 130_000, 10_000)]}]},
+                {"roundResult": "Bomb detonated", "playerStats": [{"kills": [kill("mate", "foe", 220_000, 15_000)]}]},
+                {"roundResult": "Eliminated", "playerStats": [{"kills": [kill("foe", "me", 300_000, 25_000)]}]}
+            ]
+        })
+    }
+
+    #[test]
+    fn round_ends_use_the_last_kill_or_the_defuse() {
+        let ends = round_ends(&synced_match());
+        // 3 ラウンド目は爆発なので終わりが分からず、使わない。
+        assert_eq!(ends, vec![(1, 1_060_000), (2, 1_000_000 + 120_000 + 70_000), (4, 1_300_000)]);
+    }
+
+    #[test]
+    fn offset_is_the_median_gap_and_needs_three_rounds() {
+        let details = synced_match();
+        let marks = [(1, 1_060_000 + 4_000), (2, 1_190_000 + 5_000), (4, 1_300_000 + 30_000)];
+        assert_eq!(estimate_offset(&details, &marks), Some(5_000), "外れた 1 ラウンドに引きずられない");
+        assert_eq!(estimate_offset(&details, &marks[..2]), None);
+    }
+
+    #[test]
+    fn actions_cover_everyone_with_sides_and_land_inside_the_recording() {
+        let mut catalog = GameCatalog::default();
+        for (id, name) in [("jett", "Jett"), ("sova", "Sova"), ("omen", "Omen")] {
+            catalog.agents.insert(id.into(), name.into());
+        }
+        let actions = match_actions(&synced_match(), "me", &catalog);
+        assert_eq!(actions.len(), 7, "キル 5 件と設置、解除");
+        let plant = actions.iter().find(|a| a.kind == ActionKind::Plant).unwrap();
+        assert_eq!((plant.at_ms, plant.actor.as_deref(), plant.actor_side), (1_160_000, Some("Omen"), Some(ActionSide::Enemy)));
+        let first = &actions[0];
+        assert_eq!((first.actor_side, first.target_side), (Some(ActionSide::Own), Some(ActionSide::Enemy)));
+
+        let rec = Recording {
+            id: 1, match_id: None, path: String::new(), started_ms: 1_055_000, length_ms: 200_000, bytes: 0, offset_ms: 0,
+            map: None, mode: None, width: None, height: None,
+        };
+        let placed = place_actions(actions, &rec);
+        assert_eq!(placed[0].at_ms, 5_000, "録画の前の出来事は除き、先頭からの位置にする");
+        assert!(placed.iter().all(|a| a.at_ms <= 200_000));
+    }
+
+    #[test]
+    fn chosen_range_is_a_manual_clip_clamped_to_the_recording() {
+        let rec = Recording {
+            id: 1, match_id: None, path: String::new(), started_ms: 10_000, length_ms: 60_000, bytes: 0, offset_ms: 0,
+            map: None, mode: None, width: None, height: None,
+        };
+        let action = |at_ms, side| MatchAction {
+            at_ms, round: 3, kind: ActionKind::Kill, actor: Some("Jett".into()), actor_side: Some(side),
+            target: Some("Omen".into()), target_side: Some(ActionSide::Enemy), weapon: Some("Vandal".into()),
+            headshot: at_ms == 14_000,
+        };
+        let actions = [action(10_000, ActionSide::Own), action(12_000, ActionSide::Ally), action(14_000, ActionSide::Own), action(90_000, ActionSide::Own)];
+        let (plan, at) = chosen(&rec, Some(3), -2_000, 70_000, "", &actions).unwrap();
+        assert_eq!((plan.kind, at.start_ms, at.end_ms, plan.round), (ClipKind::Manual, 0, 60_000, Some(3)));
+        assert_eq!((plan.kills, plan.title.as_str()), (2, "2K"), "範囲の中の自分のキルだけを数える");
+        assert_eq!(at.events.iter().map(|e| e.at_ms).collect::<Vec<_>>(), vec![10_000, 14_000]);
+        assert_eq!(at.events.iter().map(|e| e.headshot).collect::<Vec<_>>(), vec![false, true]);
+        let (named, _) = chosen(&rec, None, 0, 5_000, "見て", &actions).unwrap();
+        assert_eq!((named.title.as_str(), named.kills), ("見て", 0));
+        assert!(chosen(&rec, None, 5_000, 5_500, "x", &actions).is_none());
+    }
+
+    #[test]
+    fn fit_counts_only_kills_inside_the_recording() {
+        let event = |at_ms| ClipEvent { at_ms, kind: EventKind::Kill, weapon: None, victim: None, headshot: false };
+        let plan = ClipPlan {
+            kind: ClipKind::Kills, round: Some(1), start_ms: 1_000, end_ms: 20_000, kills: 2, title: "2K".into(),
+            events: vec![event(5_000), event(15_000)],
+        };
+        let rec = Recording {
+            id: 1, match_id: None, path: String::new(), started_ms: 10_000, length_ms: 60_000, bytes: 0, offset_ms: 0,
+            map: None, mode: None, width: None, height: None,
+        };
+        let (fitted, at) = fit(plan.clone(), &rec, true).unwrap();
+        assert_eq!((fitted.kills, fitted.title.as_str(), at.events.len()), (1, "キル", 1));
+        let late = Recording { started_ms: 16_000, ..rec };
+        assert!(fit(plan, &late, true).is_none(), "映るキルが無ければ作らない");
+    }
+
+    #[test]
+    fn headshot_only_when_every_hit_on_the_victim_was_to_the_head() {
+        let round = |head: i64, body: i64| {
+            json!({"playerStats": [
+                {"subject": "me", "damage": [
+                    {"receiver": "foe", "headshots": head, "bodyshots": body, "legshots": 0},
+                    {"receiver": "other", "headshots": 0, "bodyshots": 3, "legshots": 1}
+                ]},
+                {"subject": "foe", "damage": [{"receiver": "me", "headshots": 0, "bodyshots": 2, "legshots": 0}]}
+            ]})
+        };
+        let kill = json!({"killer": "me", "victim": "foe"});
+        assert!(headshot_kill(&round(1, 0), &kill));
+        assert!(!headshot_kill(&round(1, 2), &kill), "胴にも当てていれば、どこで倒したか分からない");
+        assert!(!headshot_kill(&round(0, 0), &kill), "当てた記録が無ければヘッドショットとしない");
     }
 }

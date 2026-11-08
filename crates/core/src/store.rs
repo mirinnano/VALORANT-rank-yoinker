@@ -787,7 +787,7 @@ mod tests {
         };
         let id = store.add_recording(&recording).unwrap();
         let plan = clips::manual(20_000);
-        let placed = vec![(plan.clone(), clips::Placement { start_ms: 0, end_ms: 21_000, events: vec![clips::ClipEvent { at_ms: 4_000, kind: clips::EventKind::Kill, weapon: None, victim: None }] })];
+        let placed = vec![(plan.clone(), clips::Placement { start_ms: 0, end_ms: 21_000, events: vec![clips::ClipEvent { at_ms: 4_000, kind: clips::EventKind::Kill, weapon: None, victim: None, headshot: false }] })];
         assert_eq!(store.add_clips(id, &placed).unwrap(), 1);
         assert_eq!(store.add_clips(id, &placed).unwrap(), 0, "同じ範囲は足さない");
         let saved = store.clips(id).unwrap();

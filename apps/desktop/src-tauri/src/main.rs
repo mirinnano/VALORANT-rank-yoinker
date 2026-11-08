@@ -433,6 +433,8 @@ fn main() {
             clipper::recording_active,
             clipper::set_recording_offset,
             clipper::export_clip,
+            clipper::recording_actions,
+            clipper::create_clip,
             clipper::delete_recording,
             clipper::export_share_clip,
             clipper::reveal_file

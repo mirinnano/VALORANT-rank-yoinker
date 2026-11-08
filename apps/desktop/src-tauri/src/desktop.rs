@@ -170,9 +170,34 @@ pub struct UpdateInfo {
     notes: Option<String>,
 }
 
+/// GitHub の配布は一時的に 503 や 504 を返すことがある。間を空けて取り直す。
+const UPDATE_RETRY_DELAYS: [std::time::Duration; 3] =
+    [std::time::Duration::from_secs(2), std::time::Duration::from_secs(5), std::time::Duration::from_secs(10)];
+
+/// 失敗の文に、GitHub 側の一時的な不調かどうかを足す。
+fn update_error(error: impl std::fmt::Display) -> String {
+    let text = error.to_string();
+    let busy = ["500", "502", "503", "504", "timed out", "timeout"].iter().any(|code| text.contains(code));
+    if busy {
+        format!("GitHub が一時的に応答していません ({text})。時間をおいて試すか、Releases からインストーラーを入手してください")
+    } else {
+        text
+    }
+}
+
 async fn find_update(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
     let updater = app.updater().map_err(|error| error.to_string())?;
-    updater.check().await.map_err(|error| error.to_string())
+    let mut last = None;
+    for delay in std::iter::once(None).chain(UPDATE_RETRY_DELAYS.iter().map(Some)) {
+        if let Some(delay) = delay {
+            tokio::time::sleep(*delay).await;
+        }
+        match updater.check().await {
+            Ok(found) => return Ok(found),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(update_error(last.expect("tried at least once")))
 }
 
 #[tauri::command]
@@ -184,8 +209,20 @@ pub async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
     let update = find_update(&app).await?.ok_or("新しい版はありません")?;
-    update.download_and_install(|_, _| {}, || {}).await.map_err(|error| error.to_string())?;
-    app.restart();
+    let mut last = None;
+    for delay in std::iter::once(None).chain(UPDATE_RETRY_DELAYS.iter().map(Some)) {
+        if let Some(delay) = delay {
+            tokio::time::sleep(*delay).await;
+        }
+        match update.download_and_install(|_, _| {}, || {}).await {
+            Ok(()) => app.restart(),
+            Err(error) => {
+                tracing::warn!(%error, "更新のダウンロードに失敗");
+                last = Some(error);
+            }
+        }
+    }
+    Err(update_error(last.expect("tried at least once")))
 }
 
 /// 起動時に更新を確かめ、あれば画面へ知らせる。失敗しても起動は止めない。
