@@ -141,12 +141,16 @@ fn match_view(
     let party = snapshot.players.iter().filter(|player| {
         matches!(player.relation, Relation::Own | Relation::Party)
     }).count() as u32;
+    let large_image = snapshot.map.as_ref().and_then(|map| images?.maps.get(map)?.splash.clone());
+    // Discord は画像の説明も1行として出すので、同じ文字を2回出さない。
+    let party_text = options.party.then(|| if party > 1 { "パーティ" } else { "ソロ" }.to_owned());
+    let state = if large_image.is_some() { party_text } else { snapshot.map.clone() };
     PresenceView {
         details,
         timer: Some(timer),
-        state: snapshot.map.clone(),
-        large_image: snapshot.map.as_ref().and_then(|map| images?.maps.get(map)?.splash.clone()),
-        large_text: snapshot.map.clone(),
+        state,
+        large_text: large_image.is_some().then(|| snapshot.map.clone()).flatten(),
+        large_image,
         small_image: agent.and_then(|agent| images?.agents.get(agent)?.icon.clone()),
         small_text: Some(small_text).filter(|text| !text.is_empty()),
         party: (options.party && party > 1).then_some((party, 5)),
@@ -180,6 +184,7 @@ pub fn build(event: &AppEvent, images: Option<&ImageCatalog>, options: PresenceO
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::images::MapImages;
 
     fn snapshot(state: GameState) -> MatchSnapshot {
         let mut snapshot = MatchSnapshot::empty(state, Some("Competitive".to_owned()));
@@ -247,6 +252,23 @@ mod tests {
         let mut next = timed("0 - 0", "in_game");
         clock.stamp(&mut next, 20000);
         assert_eq!(next.unwrap().started_ms, Some(20000));
+    }
+
+    #[test]
+    fn map_name_appears_once() {
+        let mut images = ImageCatalog::default();
+        let splash = Some("https://media.valorant-api.com/m.png".to_owned());
+        images.maps.insert("Ascent".to_owned(), MapImages { splash, ..Default::default() });
+        let event = AppEvent::Snapshot(snapshot(GameState::InGame));
+
+        let with_image = build(&event, Some(&images), PresenceOptions::default()).unwrap();
+        assert_eq!(with_image.large_text.as_deref(), Some("Ascent"));
+        assert_eq!(with_image.state.as_deref(), Some("ソロ"));
+
+        // 画像がなければ説明も出ないので、本文にマップ名を出す。
+        let without_image = build(&event, None, PresenceOptions::default()).unwrap();
+        assert_eq!(without_image.state.as_deref(), Some("Ascent"));
+        assert_eq!(without_image.large_text, None);
     }
 
     #[test]
