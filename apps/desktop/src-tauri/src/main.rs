@@ -228,6 +228,24 @@ async fn set_party_invite(state: State<'_, AppState>, enabled: bool) -> Result<O
     Ok(reply.as_ref().and_then(party::parse).and_then(|party| party.invite_code))
 }
 
+/// パーティの参加リンクを発行、または取り消して、発行したリンクを返す。利用者の操作でだけ呼ぶ。
+#[tauri::command]
+async fn set_join_link(state: State<'_, AppState>, enabled: bool) -> Result<Option<String>, String> {
+    // リーダー以外が発行したときの応答はまだ確かめていないので、理由は言い切らない。
+    let to_text = |error: vry_core::error::Error| match error {
+        vry_core::error::Error::Status { .. } => format!("{error}（発行できるのはパーティリーダーだけです）"),
+        other => other.to_string(),
+    };
+    let source = state.source.clone();
+    let activities = source.activities().await.map_err(to_text)?;
+    let activity = activities.as_ref().and_then(party::party_activity).ok_or("パーティが見つかりません")?;
+    let reply = source.set_join_link(&activity.activity_id, enabled).await.map_err(to_text)?;
+    if !enabled {
+        return Ok(None);
+    }
+    Ok(reply.as_ref().and_then(party::join_link).map(|link| link.url))
+}
+
 async fn shop_catalog(state: &AppState) -> Result<&ShopCatalog, String> {
     state.shop_catalog.get_or_try_init(shop::fetch_catalog).await.map_err(|error| error.to_string())
 }
@@ -397,6 +415,7 @@ fn main() {
             set_discord_options,
             discord_connected,
             set_party_invite,
+            set_join_link,
             load_shop,
             search_skins,
             wishlist,

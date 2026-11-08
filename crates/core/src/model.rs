@@ -79,6 +79,8 @@ pub struct Lobby {
     /// 自分が先頭。パーティ API が使えないときは、プレゼンスに載る人だけになる。
     pub party: Vec<PartyMember>,
     pub invite_code: Option<String>,
+    /// 期限内の参加リンク。`https://gg.riotgames.com/` で始まるものだけ。
+    pub join_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

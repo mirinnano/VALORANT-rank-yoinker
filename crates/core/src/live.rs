@@ -111,6 +111,22 @@ impl LiveSource {
             .header(header::AUTHORIZATION, format!("Basic {auth}"))
     }
 
+    /// Riot Client のローカル API を呼ぶ。本文が空なら `None`。
+    async fn local_call(&self, method: Method, path: String) -> Result<Option<Value>> {
+        let session = self.current().await?;
+        let response =
+            self.local_request(&session.lockfile, method, &path).send().await.map_err(|_| Error::ClientNotReady)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Error::Status { service: "riot-client", status: status.as_u16() });
+        }
+        let body = response.bytes().await.map_err(|_| Error::ClientNotReady)?;
+        if body.iter().all(u8::is_ascii_whitespace) {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_slice(&body)?))
+    }
+
     async fn establish(&self) -> Result<Arc<Session>> {
         let lockfile = Lockfile::parse(&read_lossy(&self.paths.lockfile)?)?;
         let log = parse_client_log(&read_lossy(&self.paths.client_log)?)
@@ -416,6 +432,15 @@ impl RiotSource for LiveSource {
         let method = if enabled { Method::POST } else { Method::DELETE };
         let path = format!("/parties/v1/parties/{party_id}/invitecode");
         self.remote_call("glz", method, |s| format!("{}{path}", s.glz_url), None).await
+    }
+
+    async fn activities(&self) -> Result<Option<Value>> {
+        self.local_call(Method::GET, "/activity-gateway/v1/activities".to_owned()).await
+    }
+
+    async fn set_join_link(&self, activity_id: &str, enabled: bool) -> Result<Option<Value>> {
+        let method = if enabled { Method::POST } else { Method::DELETE };
+        self.local_call(method, format!("/activity-gateway/v1/activities/{activity_id}/join-code/shared")).await
     }
 
     async fn storefront(&self, puuid: &str) -> Result<Option<Value>> {

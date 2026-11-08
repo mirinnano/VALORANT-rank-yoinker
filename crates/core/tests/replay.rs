@@ -396,6 +396,25 @@ async fn lobby_uses_the_party_api_with_own_member_first() {
     assert_eq!(lobby.party[1].rank.as_ref().map(|r| r.tier), Some(14));
     assert!(lobby.party[0].card_large.as_deref().unwrap().ends_with("/largeart.png"));
     assert_eq!(lobby.invite_code, None);
+    assert_eq!(lobby.join_url, None, "架空データのリンクは無効");
+}
+
+#[tokio::test]
+async fn lobby_shows_only_an_unexpired_join_link() {
+    let link = |expires: i64| serde_json::json!({"activities": {"p": {
+        "activityId": "p", "isMember": true, "product": "valorant", "type": "party",
+        "joinCode": {"isActive": true, "smartUrl": "https://gg.riotgames.com/VAL?joinCode=AB-CD", "expiresAt": expires}
+    }}});
+    let mut scenario = demo::scenario();
+    scenario.activities = Some(link(4_102_444_800_000));
+    let (mut live, _) = engine(scenario);
+    let lobby = advance(&mut live, 2).await.lobby.expect("lobby");
+    assert_eq!(lobby.join_url.as_deref(), Some("https://gg.riotgames.com/VAL?joinCode=AB-CD"));
+
+    let mut expired = demo::scenario();
+    expired.activities = Some(link(1));
+    let (mut stale, _) = engine(expired);
+    assert_eq!(advance(&mut stale, 2).await.lobby.expect("lobby").join_url, None);
 }
 
 #[tokio::test]

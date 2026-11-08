@@ -316,6 +316,10 @@ pub fn scenario() -> Scenario {
                 party_member(OWN, 15, "9fb348bc-41a0-91ad-8a3e-818035c4e561", false),
             ]
         })),
+        activities: Some(json!({"activities": {"demoParty01": {
+            "activityId": "demoParty01", "isMember": true, "product": "valorant", "type": "party",
+            "joinCode": {"isActive": false, "joinCode": "", "smartUrl": "", "expiresAt": 0}
+        }}})),
         storefront: Some(json!({
             "FeaturedBundle": {"Bundles": [{
                 "DataAssetID": "3941ad01-4e3b-46e0-ba3a-ab94f7c67f98", "Items": [{}, {}, {}],

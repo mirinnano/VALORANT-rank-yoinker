@@ -57,7 +57,12 @@ fn send(client: &mut DiscordIpcClient, view: Option<&PresenceView>) -> Result<()
     if view.competing {
         activity = activity.activity_type(ActivityType::Competing);
     }
-    activity = activity.timestamps(timestamps).buttons(vec![Button::new("busters.gg", PROJECT_URL)]);
+    let mut buttons = Vec::new();
+    if let Some(url) = &view.join_url {
+        buttons.push(Button::new("パーティに参加", url.as_str()));
+    }
+    buttons.push(Button::new("busters.gg", PROJECT_URL));
+    activity = activity.timestamps(timestamps).buttons(buttons);
     client.set_activity(activity).map_err(|error| error.to_string())
 }
 

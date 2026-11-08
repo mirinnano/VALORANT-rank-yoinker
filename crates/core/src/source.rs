@@ -51,6 +51,10 @@ pub trait RiotSource: Send + Sync {
     async fn party(&self, party_id: &str) -> Result<Option<Value>>;
     /// パーティの招待コードを発行、または無効にする。更新後のパーティを返す。
     async fn set_party_invite(&self, party_id: &str, enabled: bool) -> Result<Option<Value>>;
+    /// Riot Client の activity 一覧。参加リンクの activity ID と発行中のリンクが載る。
+    async fn activities(&self) -> Result<Option<Value>>;
+    /// パーティの参加リンクを発行、または取り消す。発行できるのはリーダーだけ。
+    async fn set_join_link(&self, activity_id: &str, enabled: bool) -> Result<Option<Value>>;
     async fn storefront(&self, puuid: &str) -> Result<Option<Value>>;
     async fn wallet(&self, puuid: &str) -> Result<Option<Value>>;
     async fn content(&self) -> Result<Value>;

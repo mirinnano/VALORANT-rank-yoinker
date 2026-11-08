@@ -37,6 +37,8 @@ pub struct Scenario {
     pub maps: HashMap<String, String>,
     pub weapons: HashMap<String, String>,
     pub party: Option<Value>,
+    /// Riot Client の activity 一覧。
+    pub activities: Option<Value>,
     pub storefront: Option<Value>,
     pub wallet: Option<Value>,
 }
@@ -194,6 +196,15 @@ impl RiotSource for ReplaySource {
             party["InviteCode"] = code.into();
             party
         }))
+    }
+
+    async fn activities(&self) -> Result<Option<Value>> {
+        Ok(self.scenario.activities.clone())
+    }
+
+    async fn set_join_link(&self, activity_id: &str, enabled: bool) -> Result<Option<Value>> {
+        let url = format!("https://gg.riotgames.com/VAL?joinCode=DEMO-{activity_id}");
+        Ok(Some(serde_json::json!({"isActive": enabled, "joinCode": "", "smartUrl": url, "expiresAt": 4_102_444_800_000_i64})))
     }
 
     async fn storefront(&self, _puuid: &str) -> Result<Option<Value>> {

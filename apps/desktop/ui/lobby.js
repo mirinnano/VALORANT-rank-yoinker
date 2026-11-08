@@ -5,7 +5,7 @@ const RR_PER_RANK = 100;
 /** Immortal 以上は RR の上限がなく、次のランクまでの距離を出せない。 */
 const LAST_LADDER_TIER = 24;
 const INVITE_HOLD_MS = 20_000;
-const lobbyView = { signature: "", phase: null, invite: null };
+const lobbyView = { signature: "", phase: null, invite: null, link: null };
 
 function memberBanner(member, profile) {
   const banner = element("li", member.is_own ? "party-banner is-own" : "party-banner");
@@ -56,21 +56,40 @@ function partyBanners(lobby, profile, onInvite) {
 }
 
 /** 発行直後は次の更新が届くまで、手元の結果を優先する。 */
-function inviteCode(lobby) {
-  const held = lobbyView.invite;
-  if (held && Date.now() < held.until) return held.code;
-  return lobby?.invite_code ?? null;
+function held(slot, fallback) {
+  const value = lobbyView[slot];
+  if (value && Date.now() < value.until) return value.value;
+  return fallback ?? null;
 }
 
+function inviteCode(lobby) {
+  return held("invite", lobby?.invite_code);
+}
+
+function joinLink(lobby) {
+  return held("link", lobby?.join_url);
+}
+
+/** コードとリンクは別の API なので、片方が失敗してももう片方は使う。 */
 async function changeInvite(enabled, status) {
-  status.textContent = enabled ? "招待コードを発行しています" : "招待コードを無効にしています";
-  try {
-    const code = await window.__TAURI__.core.invoke("set_party_invite", { enabled });
-    lobbyView.invite = { code, until: Date.now() + INVITE_HOLD_MS };
-    lobbyView.signature = "";
-    if (app.lastEvent?.lobby) renderLobby(views.lobby, app.lastEvent, app.profile);
-  } catch (error) {
-    status.textContent = `操作できませんでした: ${error}`;
+  status.textContent = enabled ? "招待コードとリンクを発行しています" : "招待コードとリンクを無効にしています";
+  const invoke = window.__TAURI__.core.invoke;
+  const [code, link] = await Promise.allSettled([
+    invoke("set_party_invite", { enabled }),
+    invoke("set_join_link", { enabled }),
+  ]);
+  const until = Date.now() + INVITE_HOLD_MS;
+  if (code.status === "fulfilled") lobbyView.invite = { value: code.value, until };
+  if (link.status === "fulfilled") lobbyView.link = { value: link.value, until };
+  lobbyView.signature = "";
+  if (app.lastEvent?.lobby) renderLobby(views.lobby, app.lastEvent, app.profile);
+  const failed = [
+    code.status === "rejected" ? `コード: ${code.reason}` : null,
+    link.status === "rejected" ? `リンク: ${link.reason}` : null,
+  ].filter(Boolean);
+  if (failed.length > 0) {
+    const live = views.lobby.querySelector(".invite .lobby-note[role=status]");
+    if (live) live.textContent = `一部を操作できませんでした。${failed.join(" / ")}`;
   }
 }
 
@@ -84,7 +103,7 @@ async function copyText(text, status, done) {
 }
 
 /** 他のメンバーの名前は外へ出さず、ランクだけを載せる。 */
-function inviteMessage(code, snapshot, profile) {
+function inviteMessage(code, link, snapshot, profile) {
   const lobby = snapshot.lobby;
   const size = lobby?.party_size ?? 1;
   const max = lobby?.max_party_size || FULL_PARTY;
@@ -95,11 +114,14 @@ function inviteMessage(code, snapshot, profile) {
   });
   const lines = [
     "VALORANT パーティ募集",
-    `パーティコード: ${code}`,
+    link ? `参加リンク: ${link}` : null,
+    code ? `パーティコード: ${code}` : null,
     snapshot.mode ? `モード: ${snapshot.mode}` : null,
     `人数: ${size}/${max}（あと${Math.max(max - size, 0)}人）`,
     ranks.length > 0 ? `メンバー: ${ranks.join("、")}` : null,
-    "参加方法: ソーシャルパネルのパーティコードに入力してください。同じ地域のプレイヤーだけが参加できます。",
+    link
+      ? "参加方法: リンクを開くか、ソーシャルパネルのパーティコードに入力してください。同じ地域のプレイヤーだけが参加できます。"
+      : "参加方法: ソーシャルパネルのパーティコードに入力してください。同じ地域のプレイヤーだけが参加できます。",
   ];
   return lines.filter(Boolean).join("\n");
 }
@@ -117,19 +139,22 @@ function inviteBlock(snapshot) {
   const status = element("p", "lobby-note");
   status.setAttribute("role", "status");
   const code = inviteCode(snapshot.lobby);
-  if (code) {
-    const message = inviteMessage(code, snapshot, app.profile);
+  const link = joinLink(snapshot.lobby);
+  if (code || link) {
+    const message = inviteMessage(code, link, snapshot, app.profile);
+    if (code) block.append(element("p", "invite-code", code));
+    if (link) block.append(element("p", "invite-link", link));
+    block.append(element("p", "invite-message", message));
+    if (link) block.append(actionButton("リンクをコピー", "primary", () => copyText(link, status, "リンクをコピーしました。")));
+    if (code) block.append(actionButton("コードをコピー", link ? "tag" : "primary", () => copyText(code, status, "コードをコピーしました。")));
     block.append(
-      element("p", "invite-code", code),
-      element("p", "invite-message", message),
-      actionButton("コードをコピー", "primary", () => copyText(code, status, "コードをコピーしました。")),
       actionButton("招待文をコピー", "tag", () => copyText(message, status, "招待文をコピーしました。")),
-      actionButton("コードを無効にする", "tag", () => changeInvite(false, status)),
+      actionButton("無効にする", "tag", () => changeInvite(false, status)),
     );
   } else {
     block.append(
-      element("p", "lobby-note", "コードを知っている人がパーティへ参加できます。同じ地域のプレイヤーだけが使えます。"),
-      actionButton("招待コードを発行", "primary", () => changeInvite(true, status)),
+      element("p", "lobby-note", "コードかリンクを知っている人がパーティへ参加できます。リンクを発行できるのはリーダーだけです。"),
+      actionButton("招待を発行", "primary", () => changeInvite(true, status)),
     );
   }
   block.append(status);
@@ -227,7 +252,7 @@ function updateLobbyClock(snapshot) {
 function renderLobby(view, snapshot, profile) {
   const lobby = snapshot.lobby;
   const { queue_started_ms: _clock, ...stable } = lobby ?? {};
-  const signature = JSON.stringify([stable, snapshot.mode, profile, inviteCode(lobby)]);
+  const signature = JSON.stringify([stable, snapshot.mode, profile, inviteCode(lobby), joinLink(lobby)]);
   if (signature === lobbyView.signature) return;
   lobbyView.signature = signature;
 

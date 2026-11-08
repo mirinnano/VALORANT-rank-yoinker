@@ -200,6 +200,7 @@ pub struct Engine {
     result_wait: u32,
     queue_started_ms: Option<i64>,
     party_info: Option<PartyInfo>,
+    party_activity: Option<party::PartyActivity>,
     party_signature: Option<(Option<String>, u32, Option<String>, bool)>,
     party_ticks: u32,
     /// メンバーが変わったときだけ取得するための控え。
@@ -240,6 +241,7 @@ impl Engine {
             result_wait: 0,
             queue_started_ms: None,
             party_info: None,
+            party_activity: None,
             party_signature: None,
             party_ticks: 0,
             party_names: HashMap::new(),
@@ -303,6 +305,7 @@ impl Engine {
         self.profile = None;
         self.profile_wait = 0;
         self.party_info = None;
+        self.party_activity = None;
         self.party_signature = None;
         self.party_names.clear();
         self.reset_match();
@@ -457,6 +460,14 @@ impl Engine {
                 None
             }
         };
+        // 参加リンクは Riot Client の activity にある。取れなくてもロビーの表示は続ける。
+        self.party_activity = match self.source.activities().await {
+            Ok(value) => value.as_ref().and_then(party::party_activity),
+            Err(error) => {
+                tracing::debug!(%error, "activity の取得に失敗");
+                None
+            }
+        };
     }
 
     /// 名前は新しいメンバーの分だけ取得する。パーティ API が使えなければプレゼンスの範囲で出す。
@@ -520,6 +531,12 @@ impl Engine {
             max_party_size: own.max_party_size,
             open: info.map_or(own.party_open, |info| info.open),
             invite_code: info.and_then(|info| info.invite_code.clone()),
+            join_url: self
+                .party_activity
+                .as_ref()
+                .and_then(|activity| activity.link.as_ref())
+                .filter(|link| link.valid_at(system_now_ms()))
+                .map(|link| link.url.clone()),
             idle: own.idle,
             queue_started_ms: self.queue_started_ms,
             party,

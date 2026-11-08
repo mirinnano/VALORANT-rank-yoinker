@@ -4,7 +4,7 @@
 //! 名前やランクは入れない。
 
 use crate::images::ImageCatalog;
-use crate::model::{AppEvent, GameState, Lobby, LobbyPhase, MatchSnapshot, PartyMember, PlayerView, Relation};
+use crate::model::{AppEvent, GameState, Lobby, LobbyPhase, MatchSnapshot, PartyMember, PlayerView, RankView, Relation};
 use serde::Deserialize;
 
 /// 設定画面で切り替える、Discord に出す項目。
@@ -33,6 +33,8 @@ pub struct PresenceView {
     pub small_text: Option<String>,
     /// 人数と上限。Discord が「(2 of 5)」の形で出す。
     pub party: Option<(u32, u32)>,
+    /// 「パーティに参加」ボタンの行き先。
+    pub join_url: Option<String>,
     /// 試合中は「プレイ中」ではなく「対戦中」の表示にする。
     pub competing: bool,
     /// 経過時間を出す区間の名前。同じ名前のあいだは時計を進め続ける。
@@ -95,33 +97,54 @@ fn own_player(snapshot: &MatchSnapshot) -> Option<&PlayerView> {
     snapshot.players.iter().find(|player| player.relation == Relation::Own)
 }
 
+fn format_rank(rank: &RankView) -> String {
+    match rank.leaderboard {
+        0 => format!("{} {}RR", rank.name, rank.rr),
+        place => format!("{} #{place}", rank.name),
+    }
+}
+
+/// 自分のランク。RR を持つプロフィールを優先し、なければ試合の表示から取る。
 fn rank_text(snapshot: &MatchSnapshot) -> Option<String> {
-    let profile = snapshot.profile.as_ref()?;
-    (profile.rank.tier > 0).then(|| format!("{} {}RR", profile.rank.name, profile.rank.rr))
+    let profile = snapshot.profile.as_ref().map(|profile| &profile.rank).filter(|rank| rank.tier > 0);
+    if let Some(rank) = profile {
+        return Some(format_rank(rank));
+    }
+    let player = own_player(snapshot).map(|player| &player.rank).filter(|rank| rank.tier > 0)?;
+    Some(player.name.to_owned())
+}
+
+/// Discord の本文は常に見えるので、ランクとパーティはここに並べる。画像の説明は
+/// マウスを重ねたときや一部の表示でしか出ない。
+fn join_parts(parts: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let text = parts.into_iter().flatten().collect::<Vec<_>>().join(" / ");
+    (!text.is_empty()).then_some(text)
 }
 
 fn lobby_view(snapshot: &MatchSnapshot, mode: &str, images: Option<&ImageCatalog>, options: PresenceOptions) -> PresenceView {
     let lobby = snapshot.lobby.as_ref();
     let profile = snapshot.profile.as_ref();
-    let tier = profile.map(|profile| profile.rank.tier).filter(|_| options.rank);
+    let tier = profile.map(|profile| profile.rank.tier).filter(|tier| options.rank && *tier > 0);
     let invite = lobby.and_then(|lobby| lobby.invite_code.as_deref()).filter(|_| options.invite);
-    let state = match invite {
+    let party = match invite {
         Some(code) => Some(format!("招待コード {code}")),
         None => lobby.filter(|_| options.party).map(party_label),
     };
-    let day = profile.filter(|profile| profile.last_day_games > 0).map(|profile| format!("24時間 {:+}RR", profile.last_day_rr));
+    let rank = options.rank.then(|| rank_text(snapshot)).flatten();
+    let day = profile
+        .filter(|profile| options.rank && profile.last_day_games > 0)
+        .map(|profile| format!("24時間 {:+}RR / {}試合", profile.last_day_rr, profile.last_day_games));
     let queueing = lobby.is_some_and(|lobby| lobby.phase == LobbyPhase::Queueing);
     PresenceView {
         details: lobby_details(lobby, mode),
-        state,
+        state: join_parts([rank.clone(), party]),
         large_image: tier
             .and_then(|tier| images?.tiers.get(&tier)?.large.clone())
             .or_else(|| own_member(snapshot)?.card_large.clone()),
-        large_text: options
-            .rank
-            .then(|| [rank_text(snapshot), day].into_iter().flatten().collect::<Vec<_>>().join(" / "))
-            .filter(|text| !text.is_empty()),
+        // 本文と同じ文字を2回出さないよう、説明には直近の増減を入れる。
+        large_text: day,
         party: lobby.filter(|_| options.party).and_then(party_count),
+        join_url: lobby.and_then(|lobby| lobby.join_url.clone()).filter(|_| options.invite),
         timer: queueing.then_some("queue"),
         ..PresenceView::default()
     }
@@ -136,23 +159,22 @@ fn match_view(
 ) -> PresenceView {
     let own = own_player(snapshot);
     let agent = own.and_then(|player| player.agent.as_deref());
-    let rank = own.map(|player| &player.rank).filter(|rank| options.rank && rank.tier > 0);
-    let small_text = [agent, rank.map(|rank| rank.name)].into_iter().flatten().collect::<Vec<_>>().join(" / ");
+    let rank = options.rank.then(|| rank_text(snapshot)).flatten();
     let party = snapshot.players.iter().filter(|player| {
         matches!(player.relation, Relation::Own | Relation::Party)
     }).count() as u32;
     let large_image = snapshot.map.as_ref().and_then(|map| images?.maps.get(map)?.splash.clone());
     // Discord は画像の説明も1行として出すので、同じ文字を2回出さない。
     let party_text = options.party.then(|| if party > 1 { "パーティ" } else { "ソロ" }.to_owned());
-    let state = if large_image.is_some() { party_text } else { snapshot.map.clone() };
+    let map = if large_image.is_some() { None } else { snapshot.map.clone() };
     PresenceView {
         details,
         timer: Some(timer),
-        state,
+        state: join_parts([map, rank, party_text]),
         large_text: large_image.is_some().then(|| snapshot.map.clone()).flatten(),
         large_image,
         small_image: agent.and_then(|agent| images?.agents.get(agent)?.icon.clone()),
-        small_text: Some(small_text).filter(|text| !text.is_empty()),
+        small_text: agent.map(str::to_owned),
         party: (options.party && party > 1).then_some((party, 5)),
         ..PresenceView::default()
     }
@@ -203,7 +225,7 @@ mod tests {
         game.score = Some((7, 5));
         let view = build(&AppEvent::Snapshot(game), None, PresenceOptions::default()).expect("view");
         assert_eq!(view.details, "Competitive 7 - 5");
-        assert_eq!(view.state.as_deref(), Some("Ascent"));
+        assert_eq!(view.state.as_deref(), Some("Ascent / ソロ"));
     }
 
     fn lobby_view(lobby: Lobby) -> PresenceView {
@@ -213,7 +235,7 @@ mod tests {
     }
 
     fn lobby(phase: LobbyPhase) -> Lobby {
-        Lobby { phase, party_size: 2, max_party_size: 5, open: false, idle: false, queue_started_ms: None, party: Vec::new(), invite_code: None }
+        Lobby { phase, party_size: 2, max_party_size: 5, open: false, idle: false, queue_started_ms: None, party: Vec::new(), invite_code: None, join_url: None }
     }
 
     #[test]
@@ -267,7 +289,7 @@ mod tests {
 
         // 画像がなければ説明も出ないので、本文にマップ名を出す。
         let without_image = build(&event, None, PresenceOptions::default()).unwrap();
-        assert_eq!(without_image.state.as_deref(), Some("Ascent"));
+        assert_eq!(without_image.state.as_deref(), Some("Ascent / ソロ"));
         assert_eq!(without_image.large_text, None);
     }
 
@@ -280,6 +302,17 @@ mod tests {
         assert_eq!(hidden.state.as_deref(), Some("パーティ"));
         let shown = PresenceOptions { invite: true, ..PresenceOptions::default() };
         assert_eq!(build(&event, None, shown).unwrap().state.as_deref(), Some("招待コード ABC123"));
+    }
+
+    #[test]
+    fn join_button_follows_the_invite_option() {
+        let mut menus = MatchSnapshot::empty(GameState::Menus, None);
+        let url = "https://gg.riotgames.com/VAL?joinCode=AB-CD".to_owned();
+        menus.lobby = Some(Lobby { join_url: Some(url.clone()), ..lobby(LobbyPhase::Ready) });
+        let event = AppEvent::Snapshot(menus);
+        assert_eq!(build(&event, None, PresenceOptions::default()).unwrap().join_url, None);
+        let shown = PresenceOptions { invite: true, ..PresenceOptions::default() };
+        assert_eq!(build(&event, None, shown).unwrap().join_url, Some(url));
     }
 
     #[test]
@@ -308,5 +341,52 @@ mod tests {
     fn pregame_names_the_phase() {
         let view = build(&AppEvent::Snapshot(snapshot(GameState::Pregame)), None, PresenceOptions::default()).expect("view");
         assert_eq!(view.details, "エージェント選択 - Competitive");
+    }
+
+    fn profile(tier: u32, name: &'static str, rr: u32) -> crate::profile::Profile {
+        let rank = RankView { tier, name, rr, leaderboard: 0 };
+        crate::profile::Profile {
+            name: None,
+            rank: rank.clone(),
+            peak: rank,
+            peak_act: None,
+            win_rate: None,
+            games: 0,
+            last_day_rr: 18,
+            last_day_games: 2,
+            history: Vec::new(),
+            summary: None,
+            detailed_games: 0,
+            matches: Vec::new(),
+            partial: false,
+        }
+    }
+
+    #[test]
+    fn lobby_shows_rank_and_party_in_the_visible_line() {
+        let mut menus = MatchSnapshot::empty(GameState::Menus, Some("Competitive".to_owned()));
+        menus.lobby = Some(lobby(LobbyPhase::Ready));
+        menus.profile = Some(profile(21, "Diamond 1", 45));
+        let event = AppEvent::Snapshot(menus);
+        let view = build(&event, None, PresenceOptions::default()).unwrap();
+        assert_eq!(view.state.as_deref(), Some("Diamond 1 45RR / パーティ"));
+        assert_eq!(view.party, Some((2, 5)));
+        assert_eq!(view.large_text.as_deref(), Some("24時間 +18RR / 2試合"));
+
+        let hidden = PresenceOptions { rank: false, ..PresenceOptions::default() };
+        let view = build(&event, None, hidden).unwrap();
+        assert_eq!(view.state.as_deref(), Some("パーティ"));
+        assert_eq!(view.large_text, None);
+    }
+
+    #[test]
+    fn match_shows_rank_and_party_next_to_the_map() {
+        let mut images = ImageCatalog::default();
+        images.maps.insert("Ascent".to_owned(), MapImages { splash: Some("https://m.png".to_owned()), ..Default::default() });
+        let mut game = snapshot(GameState::InGame);
+        game.profile = Some(profile(21, "Diamond 1", 45));
+        let view = build(&AppEvent::Snapshot(game), Some(&images), PresenceOptions::default()).unwrap();
+        assert_eq!(view.state.as_deref(), Some("Diamond 1 45RR / ソロ"));
+        assert_eq!(view.large_text.as_deref(), Some("Ascent"));
     }
 }

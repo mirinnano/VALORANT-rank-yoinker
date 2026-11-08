@@ -69,6 +69,63 @@ pub fn parse(value: &Value) -> Option<PartyInfo> {
     })
 }
 
+/// Riot が発行する参加リンクの先頭。これ以外の URL は外へ出さない。
+const SMART_URL_ROOT: &str = "https://gg.riotgames.com/";
+
+/// Riot Client の activity-gateway が発行する、期限付きの参加リンク。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinLink {
+    pub url: String,
+    pub expires_ms: i64,
+}
+
+impl JoinLink {
+    pub fn valid_at(&self, now_ms: i64) -> bool {
+        self.expires_ms > now_ms
+    }
+}
+
+/// 自分が入っている VALORANT のパーティ。activity ID はパーティ ID とは別の値。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartyActivity {
+    pub activity_id: String,
+    pub link: Option<JoinLink>,
+}
+
+/// URL のパスに入れるので、英数字と `-`、`_` だけを通す。
+fn safe_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// `JoinCodeV1` を読む。`expiresAt` はエポックミリ秒で、数値と文字列の両方がある。
+pub fn join_link(value: &Value) -> Option<JoinLink> {
+    if value.get("isActive").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let url = value.get("smartUrl")?.as_str()?;
+    let tail = url.strip_prefix(SMART_URL_ROOT)?;
+    let allowed = |c: char| c.is_ascii_alphanumeric() || "-_?=&/".contains(c);
+    if tail.is_empty() || !tail.chars().all(allowed) {
+        return None;
+    }
+    let expires = value.get("expiresAt")?;
+    let expires_ms = expires.as_i64().or_else(|| expires.as_str()?.parse().ok())?;
+    Some(JoinLink { url: url.to_owned(), expires_ms })
+}
+
+/// `/activity-gateway/v1/activities` から、自分が入っている VALORANT のパーティを探す。
+pub fn party_activity(value: &Value) -> Option<PartyActivity> {
+    value.get("activities")?.as_object()?.values().find_map(|activity| {
+        let text = |key| activity.get(key).and_then(Value::as_str);
+        let member = activity.get("isMember").and_then(Value::as_bool) == Some(true);
+        if !member || text("product") != Some("valorant") || text("type") != Some("party") {
+            return None;
+        }
+        let activity_id = text("activityId").filter(|id| safe_id(id))?.to_owned();
+        Some(PartyActivity { activity_id, link: activity.get("joinCode").and_then(join_link) })
+    })
+}
+
 pub fn current_party_id(player: &Value) -> Option<String> {
     player.get("CurrentPartyID")?.as_str().filter(|id| !id.is_empty()).map(str::to_owned)
 }
@@ -115,5 +172,45 @@ mod tests {
         let value = json!({"a": "../../evil/x", "b": "00000000-0000-0000-0000-000000000000"});
         assert_eq!(asset_id(&value, "a"), None);
         assert_eq!(asset_id(&value, "b"), None);
+    }
+
+    fn activities() -> Value {
+        json!({"activities": {
+            "other": {"activityId": "lolOne", "product": "league_of_legends", "type": "party", "isMember": true},
+            "kWWRLUs9MUla": {
+                "activityId": "kWWRLUs9MUla", "id": "6e618738-7e9a-47d6-a3df-4c48c2dc0e21",
+                "isMember": true, "product": "valorant", "type": "party",
+                "joinCode": {"expiresAt": 1794206154000_i64, "isActive": true, "joinCode": "83PS-H8IB-Yilg",
+                    "smartUrl": "https://gg.riotgames.com/VAL?joinCode=83PS-H8IB-Yilg"}
+            }
+        }})
+    }
+
+    #[test]
+    fn finds_the_valorant_party_and_its_link() {
+        let activity = party_activity(&activities()).expect("activity");
+        assert_eq!(activity.activity_id, "kWWRLUs9MUla");
+        let link = activity.link.expect("link");
+        assert_eq!(link.url, "https://gg.riotgames.com/VAL?joinCode=83PS-H8IB-Yilg");
+        assert!(link.valid_at(1794206153999));
+        assert!(!link.valid_at(1794206154000));
+    }
+
+    #[test]
+    fn rejects_links_outside_riot_and_inactive_codes() {
+        let code = |url: &str, active| json!({"isActive": active, "smartUrl": url, "expiresAt": "1794206154000"});
+        assert!(join_link(&code("https://gg.riotgames.com/VAL?joinCode=AB-CD", true)).is_some());
+        assert_eq!(join_link(&code("https://gg.riotgames.com/VAL?joinCode=AB-CD", true)).unwrap().expires_ms, 1794206154000);
+        assert!(join_link(&code("https://gg.riotgames.com/VAL?joinCode=AB-CD", false)).is_none());
+        assert!(join_link(&code("https://evil.example/VAL?joinCode=AB", true)).is_none());
+        assert!(join_link(&code("https://gg.riotgames.com.evil.example/x", true)).is_none());
+        assert!(join_link(&code("https://gg.riotgames.com/VAL?x=<script>", true)).is_none());
+    }
+
+    #[test]
+    fn skips_activities_with_unsafe_ids_or_without_membership() {
+        let value = json!({"activities": {"a": {"activityId": "../x", "product": "valorant", "type": "party", "isMember": true},
+            "b": {"activityId": "abc", "product": "valorant", "type": "party", "isMember": false}}});
+        assert_eq!(party_activity(&value), None);
     }
 }
