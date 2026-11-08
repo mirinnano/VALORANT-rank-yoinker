@@ -29,6 +29,23 @@ jobs:
           if ("v$($conf.version)" -ne "${{ github.ref_name }}") {
             Write-Error "tauri.conf.json の version ($($conf.version)) がタグ (${{ github.ref_name }}) と違います"
           }
+      # Release は tauri-action に作らせず、ここで先に作る。tauri-action は
+      # target_commitish に push 時の commit を渡すため、その commit がもうブランチの
+      # 先頭でないと GITHUB_TOKEN では作成を拒まれる (v0.1.0 で起きた)。
+      # target_commitish を付けずに既存のタグから作れば、その条件に当たらないはず。
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG は作成済みです"
+          else
+            gh release create "$TAG" --verify-tag --title "busters.gg $TAG" --notes-file .github/release-notes.md
+          fi
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -40,12 +57,6 @@ jobs:
           args: --bundles nsis
           tagName: ${{ github.ref_name }}
           releaseName: busters.gg ${{ github.ref_name }}
-          releaseBody: |
-            0.x の間はベータ版です。不具合は Issues に送ってください。
-
-            ## インストール
-            `busters.gg_*_x64-setup.exe` をダウンロードして実行してください。管理者権限は要りません。
-            インストール済みの場合は、アプリが新しい版を知らせます。
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
