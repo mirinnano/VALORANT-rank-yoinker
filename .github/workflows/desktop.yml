@@ -28,6 +28,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # release.yml と同じ理由で、NSIS は API 経由で先に置く。
+      - name: Fetch NSIS through the API
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tools = Join-Path $env:LOCALAPPDATA "tauri"
+          if (Test-Path (Join-Path $tools "NSIS\makensis.exe")) { exit 0 }
+          New-Item -ItemType Directory -Force $tools | Out-Null
+          $id = gh api repos/tauri-apps/binary-releases/releases/tags/nsis-3.13 --jq '.assets[] | select(.name == "nsis-3.13.zip") | .id'
+          $zip = Join-Path $env:RUNNER_TEMP "nsis-3.13.zip"
+          curl.exe -fsSL --retry 5 -H "Authorization: Bearer $env:GH_TOKEN" -H "Accept: application/octet-stream" -o $zip "https://api.github.com/repos/tauri-apps/binary-releases/releases/assets/$id"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS を取得できません" }
+          Expand-Archive $zip -DestinationPath $tools -Force
+          Rename-Item (Join-Path $tools "nsis-3.13") "NSIS"
       - run: npx --yes @tauri-apps/cli@2 build --bundles nsis --config tauri.ci.conf.json
         working-directory: apps/desktop/src-tauri
       - uses: actions/upload-artifact@v4
