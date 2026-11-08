@@ -126,11 +126,15 @@ impl LiveSource {
         let entitlements: Entitlements =
             response.json().await.map_err(|_| Error::ClientStep("トークンの形式が不明です"))?;
 
+        let client_version = match log.client_version {
+            Some(version) => version,
+            None => self.published_version().await?,
+        };
         let session = Arc::new(Session {
             puuid: entitlements.subject,
             access_token: entitlements.access_token,
             entitlement: entitlements.token,
-            client_version: log.client_version,
+            client_version,
             pd_url: format!("https://pd.{}.a.pvp.net", log.region),
             glz_url: format!("https://glz-{}.{}.a.pvp.net", log.glz_region, log.glz_shard),
             shared_url: format!("https://shared.{}.a.pvp.net", log.region),
@@ -138,6 +142,17 @@ impl LiveSource {
         });
         *self.session.write().await = Some(session.clone());
         Ok(session)
+    }
+
+    /// ログに版がないときの代わり。valorant-api.com が公開する現行版を使う。
+    async fn published_version(&self) -> Result<String> {
+        let value: Value =
+            self.remote.get(format!("{VALORANT_API}/version")).send().await?.error_for_status()?.json().await?;
+        value
+            .pointer("/data/riotClientVersion")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(Error::ClientStep("クライアントの版を取得できません"))
     }
 
     async fn current(&self) -> Result<Arc<Session>> {
@@ -379,6 +394,10 @@ impl RiotSource for LiveSource {
             "/mmr/v1/players/{puuid}/competitiveupdates?startIndex={start}&endIndex={end}&queue=competitive"
         ))
         .await
+    }
+
+    async fn match_history(&self, puuid: &str, start: u32, end: u32) -> Result<Option<Value>> {
+        self.pd(format!("/match-history/v1/history/{puuid}?startIndex={start}&endIndex={end}")).await
     }
 
     async fn match_details(&self, match_id: &str) -> Result<Option<Value>> {

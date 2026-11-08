@@ -5,6 +5,7 @@
 //! Streamer Mode のプレイヤーの本名は取得自体を行わない。
 
 pub mod analytics;
+pub mod clips;
 pub mod anonymize;
 pub mod content;
 pub mod demo;

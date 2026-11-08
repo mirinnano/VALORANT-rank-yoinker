@@ -21,6 +21,7 @@
       <button type="button" data-view="match" aria-pressed="false">対戦</button>
       <button type="button" data-view="review" aria-pressed="false">振り返り</button>
       <button type="button" data-view="stats" aria-pressed="false">統計</button>
+      <button type="button" data-view="clips" aria-pressed="false">クリップ</button>
       <button type="button" data-view="shop" aria-pressed="false">ストア</button>
       <button type="button" data-view="history" aria-pressed="false">遭遇履歴</button>
       <button type="button" data-view="settings" aria-pressed="false">設定</button>
@@ -38,11 +39,17 @@
       </button>
     </div>
   </header>
+  <div id="update-banner" class="update-banner" role="status" hidden>
+    <span id="update-text"></span>
+    <button id="update-install" class="tag" type="button">更新して再起動</button>
+    <button id="update-dismiss" class="tag" type="button">あとで</button>
+  </div>
   <main id="lobby-view"></main>
   <main id="home-view" hidden></main>
   <main id="match-view" hidden></main>
   <main id="review-view" hidden></main>
   <main id="stats-view" hidden></main>
+  <main id="clips-view" hidden></main>
   <main id="shop-view" hidden></main>
   <main id="history-view" hidden></main>
   <main id="settings-view" hidden>
@@ -56,6 +63,72 @@
         </span>
       </label>
       <button id="test-alert" class="tag" type="button">音を試す</button>
+    </section>
+    <section class="settings" aria-labelledby="desktop-title">
+      <h2 id="desktop-title">App</h2>
+      <label class="setting">
+        <input id="desktop-autostart" type="checkbox">
+        <span>
+          <b>Windows の起動時に開始する</b>
+          <small>ウィンドウは出さず、トレイで待ちます。</small>
+        </span>
+      </label>
+      <label class="setting">
+        <input id="desktop-front" type="checkbox">
+        <span>
+          <b>VALORANT を起動したら前面に出す</b>
+          <small>Riot Client への接続を見つけたときに一度だけ出します。</small>
+        </span>
+      </label>
+      <label class="setting">
+        <input id="desktop-tray" type="checkbox">
+        <span>
+          <b>閉じるボタンでトレイにしまう</b>
+          <small>終了するときは、トレイのアイコンを右クリックして「終了」を選びます。</small>
+        </span>
+      </label>
+      <label class="setting">
+        <input id="desktop-updates" type="checkbox">
+        <span><b>起動時に新しい版を確かめる</b></span>
+      </label>
+      <button id="check-update" class="tag" type="button">今すぐ確かめる</button>
+      <p id="desktop-status" class="settings-note" role="status"></p>
+    </section>
+    <section class="settings" aria-labelledby="recording-title">
+      <h2 id="recording-title">Recording</h2>
+      <label class="setting">
+        <input id="recording-enabled" type="checkbox">
+        <span>
+          <b>試合を録画してクリップを作る</b>
+          <small>試合中だけ VALORANT のウィンドウを録画し、試合後にキルやクラッチの場面を切り出します。録画中はゲームの負荷が少し上がります。</small>
+        </span>
+      </label>
+      <label class="setting">
+        <input id="recording-audio" type="checkbox">
+        <span>
+          <b>ゲームの音も録る</b>
+          <small>VALORANT の音だけを録ります。Discord などの通話の声は入りません。</small>
+        </span>
+      </label>
+      <div class="setting-grid">
+        <label>フレームレート
+          <select id="recording-fps"><option value="30">30 fps</option><option value="60">60 fps</option></select>
+        </label>
+        <label>画質
+          <select id="recording-bitrate"><option value="8">標準（8 Mbps）</option><option value="15">高画質（15 Mbps）</option><option value="25">最高画質（25 Mbps）</option></select>
+        </label>
+        <label>残す試合数
+          <select id="recording-keep"><option value="5">5 試合</option><option value="10">10 試合</option><option value="20">20 試合</option></select>
+        </label>
+        <label>容量の上限
+          <select id="recording-max"><option value="10">10 GB</option><option value="30">30 GB</option><option value="60">60 GB</option></select>
+        </label>
+        <label>場面を残すキー
+          <select id="clip-hotkey"><option value="F8">F8</option><option value="F9">F9</option><option value="F10">F10</option><option value="Alt+F9">Alt + F9</option><option value="">使わない</option></select>
+        </label>
+      </div>
+      <p class="settings-note">録画はビデオフォルダの busters.gg に保存します。上限を超えると古い試合から消えますが、書き出したクリップは消えません。</p>
+      <p id="recording-status" class="settings-note" role="status"></p>
     </section>
     <section class="settings" aria-labelledby="discord-title">
       <h2 id="discord-title">Discord</h2>
@@ -112,6 +185,9 @@
   <script src="history.js"></script>
   <script src="diagnostics.js"></script>
   <script src="alert.js"></script>
+  <script src="desktop.js"></script>
+  <script src="share_clip.js"></script>
+  <script src="clips.js"></script>
   <script src="window.js"></script>
   <script src="main.js"></script>
 </body>

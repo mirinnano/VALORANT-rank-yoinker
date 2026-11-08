@@ -44,6 +44,8 @@ pub trait RiotSource: Send + Sync {
     async fn competitive_updates(&self, puuid: &str) -> Result<Option<Value>>;
     /// 直近のコンペティティブの増減。自分のプロフィール用。
     async fn rank_history(&self, puuid: &str, start: u32, end: u32) -> Result<Option<Value>>;
+    /// 全モードの試合一覧。`History` に `MatchID`、`GameStartTime`、`QueueID` が並ぶ。
+    async fn match_history(&self, puuid: &str, start: u32, end: u32) -> Result<Option<Value>>;
     async fn match_details(&self, match_id: &str) -> Result<Option<Value>>;
     async fn party_player(&self, puuid: &str) -> Result<Option<Value>>;
     async fn party(&self, party_id: &str) -> Result<Option<Value>>;

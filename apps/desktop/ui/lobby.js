@@ -179,21 +179,21 @@ function ladderBlock(profile) {
 }
 
 function lastMatchBlock(profile) {
-  const point = profile.history.at(-1);
-  if (!point) return null;
+  const entry = profile.matches?.[0];
+  if (!entry) return null;
   const block = element("section", "lobby-block");
   block.append(element("h2", "", "LAST MATCH / 前の試合"));
   const button = element("button", "lobby-last");
   button.type = "button";
-  const thumbnail = picture(images.maps[point.map]?.thumbnail);
+  const thumbnail = picture(images.maps[entry.map]?.thumbnail);
   if (thumbnail) button.append(thumbnail);
+  const [outcome, outcomeClass] = matchOutcome(entry);
   button.append(
-    element("span", "", point.map ?? "マップ不明"),
-    element("span", signClass(point.earned), `${formatSigned(point.earned)} RR`),
-    element("small", "", "振り返りを開く"),
+    element("span", "", entry.map ?? entry.mode ?? "試合"),
+    element("span", outcomeClass, outcome),
+    element("small", "", `${entry.mode ?? ""} 振り返りを開く`.trim()),
   );
-  if (point.match_id) button.addEventListener("click", () => openReviewFromHome(point.match_id));
-  else button.disabled = true;
+  button.addEventListener("click", () => openReviewFromHome(entry.match_id));
   block.append(button);
   return block;
 }

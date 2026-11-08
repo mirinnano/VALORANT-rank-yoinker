@@ -26,6 +26,11 @@ pub struct Scenario {
     /// 履歴の取得を失敗させる。再試行の確認に使う。
     #[serde(skip)]
     pub fail_history: bool,
+    /// 全モードの試合一覧。`None` なら `history` のコンペティティブから作る。
+    pub match_list: Option<Value>,
+    /// 試合一覧の取得を失敗させる。
+    #[serde(skip)]
+    pub fail_match_list: bool,
     pub matches: HashMap<String, Value>,
     pub content: Value,
     pub agents: HashMap<String, String>,
@@ -197,6 +202,38 @@ impl RiotSource for ReplaySource {
 
     async fn wallet(&self, _puuid: &str) -> Result<Option<Value>> {
         Ok(self.scenario.wallet.clone())
+    }
+
+    async fn match_history(&self, _puuid: &str, start: u32, end: u32) -> Result<Option<Value>> {
+        if self.scenario.fail_match_list {
+            return Err(Error::Status { service: "pd", status: 503 });
+        }
+        let entries: Vec<Value> = match &self.scenario.match_list {
+            Some(list) => list.get("History").and_then(Value::as_array).cloned().unwrap_or_default(),
+            None => self
+                .scenario
+                .history
+                .as_ref()
+                .and_then(|history| history.get("Matches"))
+                .and_then(Value::as_array)
+                .map(|matches| {
+                    matches
+                        .iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "MatchID": m.get("MatchID"),
+                                "GameStartTime": m.get("MatchStartTime"),
+                                "QueueID": "competitive",
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        let total = entries.len();
+        let page: Vec<Value> =
+            entries.into_iter().skip(start as usize).take(end.saturating_sub(start) as usize).collect();
+        Ok(Some(serde_json::json!({ "BeginIndex": start, "EndIndex": end, "Total": total, "History": page })))
     }
 
     async fn match_details(&self, match_id: &str) -> Result<Option<Value>> {

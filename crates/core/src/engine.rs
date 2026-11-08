@@ -535,7 +535,8 @@ impl Engine {
         }
         let Some(id) = self.awaiting_result.as_deref() else { return };
         let Some(profile) = &self.profile else { return };
-        if profile.history.iter().any(|point| point.match_id.as_deref() == Some(id)) {
+        let listed = profile.matches.iter().any(|entry| entry.match_id == id);
+        if listed || profile.history.iter().any(|point| point.match_id.as_deref() == Some(id)) {
             self.awaiting_result = None;
             // 集計前に「試合なし」と判定した試合も、ここで取り直せるようにする。
             self.skipped_metrics.clear();
@@ -547,7 +548,7 @@ impl Engine {
             return;
         }
         if self.result_checks >= RESULT_MAX_CHECKS {
-            // 履歴の対象外のモードでは、いつまでも載らない。
+            // カスタムなど、一覧に載らない試合もある。
             self.awaiting_result = None;
             return;
         }
@@ -559,39 +560,56 @@ impl Engine {
     }
 
     /// プロフィールを返す。失敗しても試合の表示は止めない。
+    ///
+    /// ランク、RR の履歴、試合一覧のどれかが取れれば表示し、欠けた分はあとで取り直す。
     async fn load_profile(&mut self, puuid: &str) -> Option<Profile> {
-        if self.profile.is_some() {
+        if self.profile.as_ref().is_some_and(|profile| !profile.partial) {
             return self.profile.clone();
         }
         if self.profile_wait > 0 {
             self.profile_wait -= 1;
-            return None;
+            return self.profile.clone();
         }
         let connection = self.connection.as_ref()?;
         let seasons = connection.seasons.clone();
         let own = [puuid.to_owned()];
-        let (mmr, history, names) = tokio::join!(
+        let (mmr, history, list, names) = tokio::join!(
             self.source.mmr(puuid),
             fetch_history(self.source.as_ref(), puuid),
+            self.source.match_history(puuid, 0, HISTORY_PAGE),
             self.source.names(&own),
         );
-        let (mmr, history) = match (mmr, history) {
-            (Ok(mmr), Ok(history)) => (mmr, history),
-            (Err(error), _) | (_, Err(error)) => {
-                tracing::warn!(%error, "プロフィールの取得に失敗");
-                self.profile_wait = PROFILE_RETRY_TICKS;
-                return None;
+        let mut partial = false;
+        let mut take = |name: &str, result: Result<Option<Value>>| match result {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(%error, part = name, "プロフィールの一部を取得できません");
+                partial = true;
+                None
             }
         };
+        let all_failed = mmr.is_err() && history.is_err() && list.is_err();
+        let (mmr, history, list) = (take("mmr", mmr), take("rank_history", history), take("match_history", list));
+        self.profile_wait = if partial { PROFILE_RETRY_TICKS } else { 0 };
+        if all_failed {
+            return self.profile.clone();
+        }
         let name = names.ok().and_then(|mut names| names.remove(puuid));
-        let built = profile::build(
+        let mut built = profile::build(
             name,
             mmr.as_ref(),
             history.as_ref(),
+            list.as_ref(),
             &seasons,
             &connection.catalog,
             system_now_ms(),
         );
+        built.partial = partial;
+        // 取り直しの間も、集計済みの値を消さない。
+        if let Some(previous) = &self.profile {
+            built.summary = previous.summary.clone();
+            built.detailed_games = previous.detailed_games;
+        }
         self.profile = Some(built.clone());
         Some(built)
     }
@@ -670,8 +688,13 @@ impl Engine {
     /// 一度に取得するとレート制限に当たりやすいので、更新ごとに 1 試合だけ取る。
     async fn sync_metrics(&mut self, puuid: &str) {
         let Some(profile) = &self.profile else { return };
-        let ids: Vec<String> =
-            profile.history.iter().rev().filter_map(|point| point.match_id.clone()).collect();
+        // ランク戦に限らず、スコアボードのある最近の試合を集計する。
+        let ids: Vec<String> = profile
+            .matches
+            .iter()
+            .filter(|entry| profile::has_scoreboard(entry.queue.as_deref()))
+            .map(|entry| entry.match_id.clone())
+            .collect();
         let Some(store) = &self.store else { return };
         let missing = ids
             .iter()
@@ -717,6 +740,7 @@ impl Engine {
                 if let Some(profile) = &mut self.profile {
                     profile.summary = Some(analytics::summarize(&games));
                     profile.detailed_games = games.len() as u32;
+                    profile::apply_metrics(&mut profile.matches, &games);
                 }
             }
             Ok(_) => {}

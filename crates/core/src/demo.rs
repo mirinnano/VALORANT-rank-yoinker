@@ -140,6 +140,38 @@ fn rank_history() -> Value {
 }
 
 /// 振り返り画面用の架空の試合詳細。結果は `seed` で変わる。
+/// Ascent の範囲に収まる、決まった並びの座標。ミニマップの表示を確かめるために使う。
+fn demo_point(n: usize) -> Value {
+    let x = -5000 + ((n * 2_731) % 12_000) as i64;
+    let y = -10_500 + ((n * 4_177) % 12_500) as i64;
+    json!({"x": x, "y": y})
+}
+
+/// キルと設置に、全員の位置を足す。
+fn add_positions(round: &mut Value, seed: usize) {
+    let everyone = |offset: usize| -> Value {
+        PLAYERS
+            .iter()
+            .enumerate()
+            .map(|(i, d)| json!({"subject": d.puuid, "viewRadians": (i as f64) * 0.6,
+                                 "location": demo_point(seed * 13 + offset * 7 + i)}))
+            .collect()
+    };
+    if let Some(stats) = round.get_mut("playerStats").and_then(Value::as_array_mut) {
+        for (i, player) in stats.iter_mut().enumerate() {
+            if let Some(kills) = player.get_mut("kills").and_then(Value::as_array_mut) {
+                for (k, kill) in kills.iter_mut().enumerate() {
+                    kill["victimLocation"] = demo_point(seed * 5 + i * 3 + k);
+                    kill["playerLocations"] = everyone(i + k);
+                }
+            }
+        }
+    }
+    round["plantSite"] = json!(if seed % 2 == 0 { "A" } else { "B" });
+    round["plantLocation"] = demo_point(seed * 11);
+    round["plantPlayerLocations"] = everyone(20);
+}
+
 fn review_details(seed: usize) -> Value {
     const ROUNDS: usize = 22;
     let won_round = |round: usize| (round * 7 + seed * 3) % 5 < 3;
@@ -196,6 +228,10 @@ fn review_details(seed: usize) -> Value {
             })
         })
         .collect();
+    let mut results = results;
+    for (round, entry) in results.iter_mut().enumerate() {
+        add_positions(entry, round + seed);
+    }
 
     let blue_wins = (0..ROUNDS).filter(|round| won_round(*round)).count();
     let players: Vec<Value> = PLAYERS
@@ -271,6 +307,8 @@ pub fn scenario() -> Scenario {
         updates,
         history: Some(rank_history()),
         fail_history: false,
+        match_list: None,
+        fail_match_list: false,
         party: Some(json!({
             "ID": "party-a", "Accessibility": "CLOSED", "InviteCode": "",
             "Members": [

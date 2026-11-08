@@ -40,7 +40,8 @@ pub struct ClientLogInfo {
     pub region: String,
     pub glz_region: String,
     pub glz_shard: String,
-    pub client_version: String,
+    /// ログに版の行がまだないときは `None`。呼び出し側で別の取得元を使う。
+    pub client_version: Option<String>,
 }
 
 /// ログ全文を解析する。必要な行がなければ `None` を返す。
@@ -75,7 +76,7 @@ pub fn parse_client_log(text: &str) -> Option<ClientLogInfo> {
         pbe if pbe == "pbe" => ("na".to_owned(), ("na-1".to_owned(), "na".to_owned())),
         region => (region, glz?),
     };
-    Some(ClientLogInfo { region, glz_region, glz_shard, client_version: version? })
+    Some(ClientLogInfo { region, glz_region, glz_shard, client_version: version })
 }
 
 pub struct LocalPaths {
@@ -150,7 +151,7 @@ mod tests {
         assert_eq!(info.region, "ap");
         assert_eq!(info.glz_region, "ap-1");
         assert_eq!(info.glz_shard, "ap");
-        assert_eq!(info.client_version, "release-11.09-shipping-5-123");
+        assert_eq!(info.client_version.as_deref(), Some("release-11.09-shipping-5-123"));
     }
 
     #[test]
@@ -158,6 +159,14 @@ mod tests {
         let log = "CI server version: v\nGET https://pd.pbe.a.pvp.net/account-xp/v1/x\n";
         let info = parse_client_log(log).unwrap();
         assert_eq!((info.region.as_str(), info.glz_region.as_str()), ("na", "na-1"));
+    }
+
+    #[test]
+    fn missing_version_still_returns_servers() {
+        let log = "GET https://pd.eu.a.pvp.net/account-xp/v1/x\nhttps://glz-eu-1.eu.a.pvp.net/x\n";
+        let info = parse_client_log(log).unwrap();
+        assert_eq!(info.region, "eu");
+        assert!(info.client_version.is_none());
     }
 
     // 元実装はこの場合に EOF で無限ループしていた。

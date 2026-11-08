@@ -3,6 +3,7 @@
 use crate::error::Result;
 use crate::model::{MatchSnapshot, PlayerView, Relation};
 use crate::analytics::{MatchMetrics, ObservedPick};
+use crate::clips::{Clip, ClipKind, ClipPlan, Placement, Recording};
 use crate::model::PickPair;
 use crate::review::MatchReview;
 use crate::shop::SeenRecord;
@@ -111,7 +112,41 @@ CREATE TABLE IF NOT EXISTS review_notes (
     updated_at_ms INTEGER NOT NULL,
     PRIMARY KEY (match_id, round)
 );
+CREATE TABLE IF NOT EXISTS recordings (
+    id INTEGER PRIMARY KEY,
+    match_id TEXT,
+    path TEXT NOT NULL,
+    started_ms INTEGER NOT NULL,
+    length_ms INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    offset_ms INTEGER NOT NULL DEFAULT 0,
+    map TEXT,
+    mode TEXT
+);
+CREATE TABLE IF NOT EXISTS clips (
+    id INTEGER PRIMARY KEY,
+    recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    round INTEGER,
+    start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL,
+    kills INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    exported_path TEXT
+);
+-- round が NULL のクリップも重複を防ぐため、式で一意にする。
+CREATE UNIQUE INDEX IF NOT EXISTS clips_unique ON clips (recording_id, kind, IFNULL(round, -1), start_ms);
 ";
+
+fn add_column(db: &Connection, table: &str, column: &str, kind: &str) -> Result<()> {
+    let exists: bool = db
+        .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?
+        .exists([column])?;
+    if !exists {
+        db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
+    }
+    Ok(())
+}
 
 fn relation_label(relation: Relation) -> Option<&'static str> {
     match relation {
@@ -135,6 +170,10 @@ impl Store {
         db.busy_timeout(BUSY_TIMEOUT)?;
         db.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
         db.execute_batch(SCHEMA)?;
+        // 後から足した列。古いデータベースにもないときだけ足す。
+        add_column(&db, "recordings", "width", "INTEGER")?;
+        add_column(&db, "recordings", "height", "INTEGER")?;
+        add_column(&db, "clips", "events", "TEXT NOT NULL DEFAULT '[]'")?;
         Ok(Self { db })
     }
 
@@ -399,6 +438,126 @@ impl Store {
     }
 
     /// 直近の遭遇を新しい順に返す。puuid は UI へ渡さない。
+    pub fn add_recording(&self, recording: &Recording) -> Result<i64> {
+        self.db.execute(
+            "INSERT INTO recordings (match_id, path, started_ms, length_ms, bytes, offset_ms, map, mode, width, height)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![recording.match_id, recording.path, recording.started_ms, recording.length_ms,
+                    recording.bytes as i64, recording.offset_ms, recording.map, recording.mode,
+                    recording.width, recording.height],
+        )?;
+        Ok(self.db.last_insert_rowid())
+    }
+
+    fn recording_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Recording> {
+        Ok(Recording {
+            id: row.get(0)?,
+            match_id: row.get(1)?,
+            path: row.get(2)?,
+            started_ms: row.get(3)?,
+            length_ms: row.get(4)?,
+            bytes: row.get::<_, i64>(5)?.max(0) as u64,
+            offset_ms: row.get(6)?,
+            map: row.get(7)?,
+            mode: row.get(8)?,
+            width: row.get(9)?,
+            height: row.get(10)?,
+        })
+    }
+
+    /// 新しい順。
+    pub fn recordings(&self) -> Result<Vec<Recording>> {
+        let mut statement = self.db.prepare(
+            "SELECT id, match_id, path, started_ms, length_ms, bytes, offset_ms, map, mode, width, height
+             FROM recordings ORDER BY started_ms DESC",
+        )?;
+        let rows = statement.query_map([], Self::recording_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn recording(&self, id: i64) -> Result<Option<Recording>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT id, match_id, path, started_ms, length_ms, bytes, offset_ms, map, mode, width, height FROM recordings WHERE id = ?1",
+                [id],
+                Self::recording_row,
+            )
+            .optional()?)
+    }
+
+    pub fn set_recording_offset(&self, id: i64, offset_ms: i64) -> Result<()> {
+        self.db.execute("UPDATE recordings SET offset_ms = ?2 WHERE id = ?1", params![id, offset_ms])?;
+        Ok(())
+    }
+
+    /// 録画とそのクリップの記録を消す。動画ファイルは呼び出し側で消す。
+    pub fn delete_recording(&self, id: i64) -> Result<()> {
+        self.db.execute("DELETE FROM clips WHERE recording_id = ?1", [id])?;
+        self.db.execute("DELETE FROM recordings WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// 範囲を保存する。同じ範囲がすでにあれば足さない。
+    pub fn add_clips(&self, recording_id: i64, placed: &[(ClipPlan, Placement)]) -> Result<usize> {
+        let mut added = 0;
+        for (plan, at) in placed {
+            added += self.db.execute(
+                "INSERT OR IGNORE INTO clips (recording_id, kind, round, start_ms, end_ms, kills, title, events)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![recording_id, plan.kind.as_str(), plan.round, at.start_ms, at.end_ms, plan.kills, plan.title,
+                        serde_json::to_string(&at.events)?],
+            )?;
+        }
+        Ok(added)
+    }
+
+    /// 自動で作ったクリップを消す。時刻の補正を変えたあとに作り直すため。
+    pub fn clear_planned_clips(&self, recording_id: i64) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM clips WHERE recording_id = ?1 AND kind != 'manual' AND exported_path IS NULL",
+            [recording_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clips(&self, recording_id: i64) -> Result<Vec<Clip>> {
+        let mut statement = self.db.prepare(
+            "SELECT id, recording_id, kind, round, start_ms, end_ms, kills, title, exported_path, events
+             FROM clips WHERE recording_id = ?1 ORDER BY start_ms",
+        )?;
+        let rows = statement.query_map([recording_id], |row| {
+            let kind: String = row.get(2)?;
+            Ok(Clip {
+                id: row.get(0)?,
+                recording_id: row.get(1)?,
+                kind: ClipKind::parse(&kind).unwrap_or(ClipKind::Manual),
+                round: row.get(3)?,
+                start_ms: row.get(4)?,
+                end_ms: row.get(5)?,
+                kills: row.get(6)?,
+                title: row.get(7)?,
+                exported_path: row.get(8)?,
+                events: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_clip_exported(&self, clip_id: i64, path: &str) -> Result<()> {
+        self.db.execute("UPDATE clips SET exported_path = ?2 WHERE id = ?1", params![clip_id, path])?;
+        Ok(())
+    }
+
+    pub fn clip(&self, clip_id: i64) -> Result<Option<Clip>> {
+        let recording: Option<i64> = self
+            .db
+            .query_row("SELECT recording_id FROM clips WHERE id = ?1", [clip_id], |row| row.get(0))
+            .optional()?;
+        let Some(recording) = recording else { return Ok(None) };
+        Ok(self.clips(recording)?.into_iter().find(|clip| clip.id == clip_id))
+    }
+
     pub fn recent(&self, limit: u32) -> Result<Vec<Encounter>> {
         let mut query = self.db.prepare_cached(
             "SELECT e.display_name, e.agent, e.map, e.relation, e.rank, e.seen_at_ms,
@@ -616,5 +775,33 @@ mod tests {
         hidden.name_hidden = true;
         store.record(&snapshot("m1", vec![hidden]), 1).unwrap();
         assert_eq!(store.recent(1).unwrap()[0].display_name, "Jett");
+    }
+
+    #[test]
+    fn recordings_and_clips_round_trip() {
+        use crate::clips::{self, ClipKind};
+        let store = Store::in_memory().unwrap();
+        let recording = Recording {
+            id: 0, match_id: Some("m".into()), path: "a.mp4".into(), started_ms: 1_000, length_ms: 60_000,
+            bytes: 10, offset_ms: 0, map: Some("Ascent".into()), mode: None, width: Some(1920), height: Some(1080),
+        };
+        let id = store.add_recording(&recording).unwrap();
+        let plan = clips::manual(20_000);
+        let placed = vec![(plan.clone(), clips::Placement { start_ms: 0, end_ms: 21_000, events: vec![clips::ClipEvent { at_ms: 4_000, kind: clips::EventKind::Kill, weapon: None, victim: None }] })];
+        assert_eq!(store.add_clips(id, &placed).unwrap(), 1);
+        assert_eq!(store.add_clips(id, &placed).unwrap(), 0, "同じ範囲は足さない");
+        let saved = store.clips(id).unwrap();
+        assert_eq!(saved[0].kind, ClipKind::Manual);
+        assert_eq!(saved[0].events[0].at_ms, 4_000);
+        assert_eq!(store.recording(id).unwrap().unwrap().width, Some(1920));
+        store.clear_planned_clips(id).unwrap();
+        assert_eq!(store.clips(id).unwrap().len(), 1, "手動のクリップは残す");
+        store.set_clip_exported(saved[0].id, "out.mp4").unwrap();
+        assert_eq!(store.clip(saved[0].id).unwrap().unwrap().exported_path.as_deref(), Some("out.mp4"));
+        store.set_recording_offset(id, 1_500).unwrap();
+        assert_eq!(store.recording(id).unwrap().unwrap().offset_ms, 1_500);
+        store.delete_recording(id).unwrap();
+        assert!(store.recordings().unwrap().is_empty());
+        assert!(store.clips(id).unwrap().is_empty());
     }
 }

@@ -10,6 +10,7 @@ const views = {
   stats: document.getElementById("stats-view"),
   settings: document.getElementById("settings-view"),
   history: document.getElementById("history-view"),
+  clips: document.getElementById("clips-view"),
 };
 const IMAGE_RETRIES = 3;
 const IMAGE_RETRY_MS = 30_000;
@@ -86,6 +87,7 @@ function showView(name) {
     button.setAttribute("aria-pressed", String(button.dataset.view === name));
   }
   if (name === "shop") showShop(views.shop);
+  if (name === "clips") showClips(views.clips);
   if (name === "review") {
     showReviewList().catch((error) => {
       views.review.replaceChildren(noticeBox("振り返りを開けませんでした", String(error)));

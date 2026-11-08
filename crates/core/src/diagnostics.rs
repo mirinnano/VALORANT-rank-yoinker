@@ -46,6 +46,11 @@ const HISTORY_FIELDS: [Field; 6] = [
     ("Matches.*.TierAfterUpdate", Unconfirmed),
     ("Matches.*.RankedRatingAfterUpdate", Unconfirmed),
 ];
+const MATCH_LIST_FIELDS: [Field; 3] = [
+    ("History.*.MatchID", Unconfirmed),
+    ("History.*.GameStartTime", Unconfirmed),
+    ("History.*.QueueID", Unconfirmed),
+];
 const MATCH_FIELDS: [Field; 15] = [
     ("matchInfo.gameStartMillis", Confirmed),
     ("matchInfo.gameLengthMillis", Confirmed),
@@ -364,8 +369,24 @@ pub async fn run(source: &dyn RiotSource) -> Report {
         checks.push(judge_reply("RR の履歴", &HISTORY_FIELDS, &history, "履歴の応答がありません"));
     }
 
+    let list = source.match_history(&own, 0, HISTORY_MATCHES).await;
+    let list_empty = matches!(&list, Ok(Some(value))
+        if value.get("History").and_then(Value::as_array).is_none_or(Vec::is_empty));
+    if list_empty {
+        checks.push(skipped("試合一覧", "試合の記録がありません"));
+    } else {
+        checks.push(judge_reply("試合一覧", &MATCH_LIST_FIELDS, &list, "一覧の応答がありません"));
+    }
+
+    // ランク戦がなくても、全モードの一覧から最新の試合を調べる。
     let latest = history.as_ref().ok().and_then(Option::as_ref).and_then(crate::stats::latest_match);
-    let match_id = latest.and_then(|m| m.get("MatchID")).and_then(Value::as_str);
+    let latest_any = list
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .and_then(|value| value.pointer("/History/0/MatchID"))
+        .and_then(Value::as_str);
+    let match_id = latest_any.or_else(|| latest.and_then(|m| m.get("MatchID")).and_then(Value::as_str));
     match match_id {
         Some(id) => match source.match_details(id).await {
             Ok(Some(details)) => check_review(&own, &details, &catalog, &mut checks),
@@ -440,10 +461,15 @@ async fn capture(source: &dyn RiotSource) -> Result<Scenario> {
     }
 
     let history = source.rank_history(&own, 0, HISTORY_MATCHES).await?;
+    let match_list = source.match_history(&own, 0, HISTORY_MATCHES).await?;
+    let listed = match_list
+        .iter()
+        .flat_map(|value| value.get("History").and_then(Value::as_array).into_iter().flatten());
     let ids: BTreeSet<String> = history
         .iter()
         .chain(updates.values())
         .flat_map(|value| value.get("Matches").and_then(Value::as_array).into_iter().flatten())
+        .chain(listed)
         .filter_map(|entry| entry.get("MatchID")?.as_str().map(str::to_owned))
         .take(RECORDED_MATCHES)
         .collect();
@@ -468,6 +494,8 @@ async fn capture(source: &dyn RiotSource) -> Result<Scenario> {
         updates,
         history,
         fail_history: false,
+        match_list,
+        fail_match_list: false,
         matches,
         content: serde_json::json!({ "Seasons": seasons }),
         agents: catalog.agents,

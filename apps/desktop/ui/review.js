@@ -81,9 +81,10 @@ function renderRoundDetail() {
   const opening = round.first_kill ? "先手を取った" : round.first_death ? "最初に倒された" : "－";
   fact(facts, "開幕", opening);
   if (round.clutch_against) fact(facts, "クラッチ", `1v${round.clutch_against}`);
+  if (round.plant_site) fact(facts, "設置", `${round.plant_site} サイト`);
   pane.replaceChildren(
     element("p", "note-title", `第${round.number}ラウンド`),
-    eventList(round),
+    (round.timeline ?? []).length > 0 ? roundTimeline(round) : eventList(round),
     facts,
     createNoteEditor(round.number),
   );
@@ -120,8 +121,103 @@ function eventList(round) {
   return list;
 }
 
+const SIDE_TEXT = { own: "あなた", ally: "味方", enemy: "相手" };
+
+function actorName(actor) {
+  if (!actor) return "－";
+  return actor.side === "own" ? "あなた" : `${actor.agent ?? "不明"}（${SIDE_TEXT[actor.side]}）`;
+}
+
+function timelineText(event) {
+  if (event.kind === "plant") return `${actorName(event.actor)} がスパイクを設置`;
+  if (event.kind === "defuse") return `${actorName(event.actor)} がスパイクを解除`;
+  const assists = event.assists.length ? `（アシスト ${event.assists.map((a) => a.agent ?? "不明").join("、")}）` : "";
+  return `${actorName(event.actor)} → ${actorName(event.target)}${assists}`;
+}
+
+/** ゲーム内の座標を、ミニマップの 0〜1000 の座標へ変える。 */
+function toMinimap(point, transform) {
+  return {
+    x: (point.y * transform.x_multiplier + transform.x_scalar) * 1000,
+    y: (point.x * transform.y_multiplier + transform.y_scalar) * 1000,
+  };
+}
+
+/** 出来事の瞬間の全員の位置を、ミニマップに描く。 */
+function minimapView(event) {
+  const map = images.maps[reviewState.review.map];
+  if (!map?.minimap || !map.transform || !event) return null;
+  const board = svg("svg", { viewBox: "0 0 1000 1000", class: "minimap", role: "img",
+    "aria-label": `${formatRoundTime(event.at_ms)} の位置。${timelineText(event)}` });
+  board.append(svg("image", { href: map.minimap, x: 0, y: 0, width: 1000, height: 1000 }));
+  for (const placed of event.positions) {
+    const at = toMinimap(placed.at, map.transform);
+    const group = svg("g", { class: `is-${placed.actor.side}` });
+    if (placed.view !== null) {
+      // 向きはゲーム内の +x 軸からの角度とみなす。ミニマップは x と y を入れ替えて描くので、成分も入れ替える。
+      // 角度の基準は実データで未確認。
+      const angle = placed.view / 1000;
+      const dx = Math.sin(angle) * Math.sign(map.transform.x_multiplier) * 34;
+      const dy = Math.cos(angle) * Math.sign(map.transform.y_multiplier) * 34;
+      group.append(svg("line", { x1: at.x, y1: at.y, x2: at.x + dx, y2: at.y + dy, class: "view" }));
+    }
+    group.append(svg("circle", { cx: at.x, cy: at.y, r: 13 }));
+    const title = svg("title", {});
+    title.textContent = actorName(placed.actor);
+    group.append(title);
+    board.append(group);
+  }
+  if (event.location) {
+    const at = toMinimap(event.location, map.transform);
+    const mark = event.kind === "kill" ? "is-death-mark" : "is-spike-mark";
+    board.append(svg("path", { d: `M${at.x - 14},${at.y - 14}L${at.x + 14},${at.y + 14}M${at.x + 14},${at.y - 14}L${at.x - 14},${at.y + 14}`, class: mark }));
+  }
+  return board;
+}
+
+/** ラウンドの全員の出来事。時間軸、一覧、選んだ瞬間のミニマップを並べる。 */
+function roundTimeline(round) {
+  const events = round.timeline;
+  const selected = Math.min(reviewState.event ?? 0, events.length - 1);
+  const wrap = element("div", "round-timeline");
+  const end = Math.max(...events.map((event) => event.at_ms), 1);
+
+  const axis = element("div", "timeline-axis");
+  axis.setAttribute("aria-hidden", "true");
+  events.forEach((event, index) => {
+    const tick = element("i", `is-${event.kind} is-${event.actor?.side ?? "none"}${index === selected ? " is-selected" : ""}`);
+    tick.style.left = `${(event.at_ms / end) * 100}%`;
+    axis.append(tick);
+  });
+
+  const list = element("ol", "round-events timeline-events");
+  events.forEach((event, index) => {
+    const item = element("li", `is-${event.kind} is-${event.actor?.side ?? "none"}`);
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-pressed", String(index === selected));
+    const choose = () => { reviewState.event = index; renderRoundDetail(); };
+    item.addEventListener("click", choose);
+    item.addEventListener("keydown", (key) => { if (key.key === "Enter" || key.key === " ") { key.preventDefault(); choose(); } });
+    item.append(
+      element("span", "event-time", formatRoundTime(event.at_ms)),
+      event.actor?.agent ? agentIcon(event.actor.agent, 26) : element("span", "event-mark"),
+      element("span", "", timelineText(event)),
+      element("span", "event-weapon", [event.weapon, `${event.alive[0]}v${event.alive[1]}`].filter(Boolean).join("  ")),
+    );
+    list.append(item);
+  });
+
+  const map = minimapView(events[selected]);
+  wrap.append(axis);
+  if (map) wrap.append(map);
+  wrap.append(list);
+  return wrap;
+}
+
 function focusRound(number) {
   reviewState.round = number;
+  reviewState.event = 0;
   renderRounds();
   renderRoundDetail();
   document.getElementById("round-strip")?.scrollIntoView({ block: "nearest" });
@@ -156,6 +252,7 @@ function highlightSection(review) {
 
 function selectRound(number) {
   reviewState.round = reviewState.round === number ? null : number;
+  reviewState.event = 0;
   renderRounds();
   renderRoundDetail();
 }

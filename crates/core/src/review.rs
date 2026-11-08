@@ -56,6 +56,65 @@ pub struct RoundLine {
     pub clutch_against: Option<u32>,
     /// このラウンドの自分の行動。時間順。
     pub events: Vec<RoundEvent>,
+    /// このラウンドの全員の行動。時間順。
+    pub timeline: Vec<TimelineEvent>,
+    /// スパイクを設置した場所。`A` などの記号。
+    pub plant_site: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    Own,
+    Ally,
+    Enemy,
+}
+
+/// 行動した人。名前は出さず、エージェントと陣営で表す。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Actor {
+    pub agent: Option<String>,
+    pub side: Side,
+}
+
+/// ゲーム内の座標。ミニマップへの変換は画面側で行う。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+/// その瞬間の 1 人の位置。`view` は向きをミリラジアンで表す。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Placed {
+    pub actor: Actor,
+    pub at: Point,
+    pub view: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineKind {
+    Kill,
+    Plant,
+    Defuse,
+}
+
+/// ラウンド中の 1 つの出来事。キルのほか、設置と解除も並べる。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TimelineEvent {
+    pub at_ms: i64,
+    pub kind: TimelineKind,
+    pub actor: Option<Actor>,
+    pub target: Option<Actor>,
+    pub assists: Vec<Actor>,
+    pub weapon: Option<String>,
+    /// 倒された場所、または設置と解除の場所。
+    pub location: Option<Point>,
+    /// その瞬間に記録された全員の位置。
+    pub positions: Vec<Placed>,
+    /// この出来事のあとに生き残っている人数。`(味方, 相手)`。
+    pub alive: (u32, u32),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -179,7 +238,7 @@ fn tally_players(rounds: &[Value]) -> HashMap<&str, Tally> {
     tallies
 }
 
-fn weapon_name(kill: &Value, catalog: &GameCatalog) -> Option<String> {
+pub(crate) fn weapon_name(kill: &Value, catalog: &GameCatalog) -> Option<String> {
     let finishing = kill.get("finishingDamage")?;
     match text(finishing, "damageType")? {
         "Weapon" => catalog.weapons.get(&text(finishing, "damageItem")?.to_lowercase()).cloned(),
@@ -216,6 +275,109 @@ fn round_events(round: &Value, kills: &[&Value], own: &str, labels: &Labels, cat
 }
 
 type Labels = HashMap<String, String>;
+
+fn point(value: Option<&Value>) -> Option<Point> {
+    let value = value?;
+    let coordinate = |key| value.get(key).and_then(Value::as_f64).map(|v| v.round() as i64);
+    Some(Point { x: coordinate("x")?, y: coordinate("y")? })
+}
+
+/// 全員の行動をラウンドの時間順に並べる。
+fn round_timeline(
+    round: &Value,
+    kills: &[&Value],
+    own: &str,
+    team: Option<&str>,
+    teams: &HashMap<&str, &str>,
+    labels: &Labels,
+    catalog: &GameCatalog,
+) -> Vec<TimelineEvent> {
+    let actor = |subject: Option<&str>| {
+        let subject = subject?;
+        let side = if subject == own {
+            Side::Own
+        } else if team.is_some() && teams.get(subject).copied() == team {
+            Side::Ally
+        } else {
+            Side::Enemy
+        };
+        Some(Actor { agent: labels.get(subject).cloned(), side })
+    };
+    let placed = |locations: &[Value]| -> Vec<Placed> {
+        locations
+            .iter()
+            .filter_map(|entry| {
+                Some(Placed {
+                    actor: actor(text(entry, "subject"))?,
+                    at: point(entry.get("location"))?,
+                    view: entry.get("viewRadians").and_then(Value::as_f64).map(|v| (v * 1000.0).round() as i64),
+                })
+            })
+            .collect()
+    };
+
+    // ラウンドに出ている人数から、生き残りを数える。
+    let subjects: Vec<&str> = list(round, "playerStats").iter().filter_map(|p| text(p, "subject")).collect();
+    let is_ally = |subject: &str| team.is_some() && teams.get(subject).copied() == team;
+    let mut alive_allies = subjects.iter().filter(|s| is_ally(s)).count() as u32;
+    let mut alive_enemies = subjects.len() as u32 - alive_allies;
+
+    let mut events: Vec<TimelineEvent> = Vec::new();
+    for kill in kills {
+        let victim = text(kill, "victim");
+        if let Some(victim) = victim {
+            if is_ally(victim) {
+                alive_allies = alive_allies.saturating_sub(1);
+            } else {
+                alive_enemies = alive_enemies.saturating_sub(1);
+            }
+        }
+        events.push(TimelineEvent {
+            at_ms: kill_time(kill).min(i64::from(i32::MAX)),
+            kind: TimelineKind::Kill,
+            actor: actor(text(kill, "killer")),
+            target: actor(victim),
+            assists: list(kill, "assistants").iter().filter_map(|a| actor(a.as_str())).collect(),
+            weapon: weapon_name(kill, catalog),
+            location: point(kill.get("victimLocation")),
+            positions: placed(list(kill, "playerLocations")),
+            alive: (alive_allies, alive_enemies),
+        });
+    }
+    let mut action = |kind, who: &str, time: &str, place: &str, others: &str| {
+        let Some(subject) = text(round, who) else { return };
+        let at_ms = int(round, time);
+        // 設置と解除の時点の生存人数は、それより前のキルから求める。
+        let alive = events
+            .iter()
+            .filter(|event| event.kind == TimelineKind::Kill && event.at_ms <= at_ms)
+            .last()
+            .map_or((alive_allies_at_start(&subjects, &is_ally), alive_enemies_at_start(&subjects, &is_ally)), |e| e.alive);
+        events.push(TimelineEvent {
+            at_ms,
+            kind,
+            actor: actor(Some(subject)),
+            target: None,
+            assists: Vec::new(),
+            weapon: None,
+            location: point(round.get(place)),
+            positions: placed(list(round, others)),
+            alive,
+        });
+    };
+    action(TimelineKind::Plant, "bombPlanter", "plantRoundTime", "plantLocation", "plantPlayerLocations");
+    action(TimelineKind::Defuse, "bombDefuser", "defuseRoundTime", "defuseLocation", "defusePlayerLocations");
+    events.sort_by_key(|event| event.at_ms);
+    events
+}
+
+fn alive_allies_at_start(subjects: &[&str], is_ally: &impl Fn(&str) -> bool) -> u32 {
+    subjects.iter().filter(|s| is_ally(s)).count() as u32
+}
+
+fn alive_enemies_at_start(subjects: &[&str], is_ally: &impl Fn(&str) -> bool) -> u32 {
+    subjects.len() as u32 - alive_allies_at_start(subjects, is_ally)
+}
 
 fn highlight(round: &RoundLine) -> Option<Highlight> {
     let weapon = round
@@ -285,6 +447,8 @@ fn round_line(
         result: text(round, "roundResult").map(str::to_owned),
         clutch_against: analytics::clutch_opponents(own, team, teams, &analytics::round_kills(round)),
         events: round_events(round, &analytics::round_kills(round), own, labels, catalog),
+        timeline: round_timeline(round, &analytics::round_kills(round), own, team, teams, labels, catalog),
+        plant_site: text(round, "plantSite").filter(|site| !site.is_empty()).map(str::to_owned),
     }
 }
 
@@ -574,6 +738,7 @@ mod tests {
         RoundLine {
             number, won, kills, damage: 0, died: false, first_kill: false, first_death: false,
             loadout: 0, spent: 0, result: None, clutch_against: None, events: Vec::new(),
+            timeline: Vec::new(), plant_site: None,
         }
     }
 
@@ -666,5 +831,48 @@ mod tests {
         let r = analyze("me", &details(rounds), &catalog()).unwrap();
         let finding = r.findings.iter().find(|f| f.title.contains("フルバイ")).unwrap();
         assert_eq!(finding.rounds, [1, 2, 4]);
+    }
+
+    #[test]
+    fn timeline_lists_every_player_with_positions_and_alive_counts() {
+        let round = json!({
+            "roundNum": 0, "winningTeam": "Blue", "roundResult": "Bomb detonated",
+            "bombPlanter": "me", "plantRoundTime": 40000, "plantSite": "A",
+            "plantLocation": {"x": 100.4, "y": -200.0},
+            "plantPlayerLocations": [{"subject": "e1", "viewRadians": 1.5, "location": {"x": 1, "y": 2}}],
+            "playerStats": [
+                {"subject": "me", "kills": []},
+                {"subject": "a1", "kills": [
+                    {"killer": "a1", "victim": "e1", "timeSinceRoundStartMillis": 12000,
+                     "assistants": ["me"], "victimLocation": {"x": 5, "y": 6},
+                     "playerLocations": [{"subject": "a1", "viewRadians": 0.5, "location": {"x": 3, "y": 4}}]}
+                ]},
+                {"subject": "e1", "kills": []},
+                {"subject": "e2", "kills": [
+                    {"killer": "e2", "victim": "a1", "timeSinceRoundStartMillis": 50000}
+                ]}
+            ]
+        });
+        let mut data = details(vec![round]);
+        data["players"] = json!([
+            player("me", "Blue", "a-jett", 200), player("a1", "Blue", "a-sage", 100),
+            player("e1", "Red", "a-omen", 100), player("e2", "Red", "a-omen", 100)
+        ]);
+        let review = analyze("me", &data, &catalog()).unwrap();
+        let line = &review.rounds[0];
+        assert_eq!(line.plant_site.as_deref(), Some("A"));
+        let kinds: Vec<_> = line.timeline.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [TimelineKind::Kill, TimelineKind::Plant, TimelineKind::Kill]);
+        let first = &line.timeline[0];
+        assert_eq!(first.actor.as_ref().map(|a| a.side), Some(Side::Ally));
+        assert_eq!(first.assists[0].side, Side::Own);
+        assert_eq!(first.location, Some(Point { x: 5, y: 6 }));
+        assert_eq!(first.positions[0].view, Some(500));
+        assert_eq!(first.alive, (2, 1));
+        assert_eq!(line.timeline[1].alive, (2, 1), "設置は直前のキルの人数を引き継ぐ");
+        assert_eq!(line.timeline[1].location, Some(Point { x: 100, y: -200 }));
+        assert_eq!(line.timeline[2].alive, (1, 1));
+        // 名前は出さない。
+        assert!(!serde_json::to_string(&line.timeline).unwrap().contains("Real"));
     }
 }

@@ -18,11 +18,18 @@
         "minWidth": 1100,
         "minHeight": 640,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required",
-        "decorations": false
+        "decorations": false,
+        "visible": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' https://media.valorant-api.com; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' https://media.valorant-api.com; connect-src ipc: http://ipc.localhost; media-src 'self' asset: http://asset.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$VIDEO/busters.gg/**"
+        ]
+      }
     }
   },
   "bundle": {
@@ -54,6 +61,18 @@
         "displayLanguageSelector": false,
         "compression": "lzma",
         "startMenuFolder": "busters.gg"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVEOTlBQTEzN0I2N0Y0QzQKUldURTlHZDdFNnFaN1JyRnhSZ3ErajUvYWVza05RdzhxdmxXR0s3ZFdCQVJyY3k1alJBRThaZ1gK",
+      "endpoints": [
+        "https://github.com/mirinnano/VALORANT-rank-yoinker/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

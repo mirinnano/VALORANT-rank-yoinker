@@ -154,7 +154,7 @@ async function drawShare(canvas, review, withName) {
   drawHeadline(context, `${review.own_score}-${review.enemy_score}`, SHARE_MARGIN, 490, 170, SHARE_COLOR.paper);
   drawFigures(context, review);
   drawScene(context, review.highlights?.[0]);
-  drawLabel(context, "vRY", SHARE_SIZE.width - 130, SHARE_SIZE.height - 50, 30, SHARE_COLOR.mute);
+  drawLabel(context, "busters.gg", SHARE_SIZE.width - 230, SHARE_SIZE.height - 50, 30, SHARE_COLOR.mute);
 }
 
 function canvasBlob(canvas) {

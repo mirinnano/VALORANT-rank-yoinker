@@ -19,10 +19,35 @@ pub struct AgentImages {
     pub role: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct MapImages {
     pub splash: Option<String>,
     pub thumbnail: Option<String>,
+    /// 上から見たミニマップ。
+    pub minimap: Option<String>,
+    /// ゲーム内の座標をミニマップの 0〜1 へ変換する値。
+    /// `u = y * x_multiplier + x_scalar`、`v = x * y_multiplier + y_scalar`。
+    pub transform: Option<MapTransform>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct MapTransform {
+    pub x_multiplier: f64,
+    pub y_multiplier: f64,
+    pub x_scalar: f64,
+    pub y_scalar: f64,
+}
+
+fn transform(map: &Value) -> Option<MapTransform> {
+    let number = |key| map.get(key).and_then(Value::as_f64);
+    let transform = MapTransform {
+        x_multiplier: number("xMultiplier")?,
+        y_multiplier: number("yMultiplier")?,
+        x_scalar: number("xScalarToAdd")?,
+        y_scalar: number("yScalarToAdd")?,
+    };
+    // 練習場などは 0 が入っていて、変換に使えない。
+    (transform.x_multiplier != 0.0 && transform.y_multiplier != 0.0).then_some(transform)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -32,7 +57,7 @@ pub struct TierImages {
 }
 
 /// 表示名と tier から引く。UI の値をそのままキーにできるようにする。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ImageCatalog {
     pub agents: HashMap<String, AgentImages>,
     pub maps: HashMap<String, MapImages>,
@@ -79,6 +104,8 @@ pub fn parse(agents: &[Value], maps: &[Value], tier_sets: &[Value], titles: &[Va
                 let images = MapImages {
                     splash: media_url(map, "splash"),
                     thumbnail: media_url(map, "listViewIcon"),
+                    minimap: media_url(map, "displayIcon"),
+                    transform: transform(map),
                 };
                 Some((name(map)?, images))
             })

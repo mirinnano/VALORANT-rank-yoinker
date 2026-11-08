@@ -108,6 +108,39 @@ async fn failed_profile_is_not_requested_every_tick() {
 }
 
 #[tokio::test]
+async fn profile_shows_what_loaded_when_the_match_list_fails() {
+    let mut scenario = demo::scenario();
+    scenario.timeline = vec![scenario.timeline[0].clone()];
+    scenario.fail_match_list = true;
+    let (mut engine, source) = engine(scenario);
+    let snapshot = engine.step().await.unwrap();
+    let profile = snapshot.profile.expect("一部が取れればプロフィールを出す");
+    assert!(profile.partial);
+    assert!(!profile.history.is_empty(), "RR の履歴は出る");
+    assert!(!profile.matches.is_empty(), "一覧がなければ RR の履歴から最近の試合を作る");
+    let calls = source.history_calls();
+    advance(&mut engine, 12).await;
+    assert!(source.history_calls() > calls, "欠けた分を取り直す");
+}
+
+#[tokio::test]
+async fn recent_matches_include_other_modes() {
+    let mut scenario = demo::scenario();
+    scenario.timeline = vec![scenario.timeline[0].clone()];
+    scenario.match_list = Some(serde_json::json!({"History": [
+        {"MatchID": "history-1", "GameStartTime": 9_999_999_999_999_i64, "QueueID": "unrated"},
+        {"MatchID": "dm", "GameStartTime": 9_999_999_999_998_i64, "QueueID": "deathmatch"}
+    ]}));
+    let (mut engine, _source) = engine(scenario);
+    advance(&mut engine, 3).await;
+    let snapshot = engine.step().await.unwrap();
+    let profile = snapshot.profile.unwrap();
+    assert_eq!(profile.matches[0].mode.as_deref(), Some("Unrated"));
+    assert_eq!(profile.matches[0].won.is_some(), true, "スコアボードのあるモードは集計する");
+    assert!(profile.matches[1].kills.is_none(), "デスマッチは集計しない");
+}
+
+#[tokio::test]
 async fn players_appear_before_their_ranks_finish_loading() {
     let mut scenario = demo::scenario();
     scenario.timeline = vec![scenario.timeline[MENUS + PREGAME].clone()];

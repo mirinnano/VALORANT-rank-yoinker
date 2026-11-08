@@ -96,26 +96,34 @@ function figure(value, label, className = "") {
   return box;
 }
 
-function recentList(history) {
+function matchOutcome(entry) {
+  if (entry.rr_earned !== null) return [`${formatSigned(entry.rr_earned)} RR`, signClass(entry.rr_earned)];
+  if (entry.won === true) return ["WIN", "gain"];
+  if (entry.won === false) return ["LOSS", "loss"];
+  return [entry.kills === null ? "－" : `${entry.kills}/${entry.deaths}/${entry.assists}`, ""];
+}
+
+// 全モードの最近の試合。ランク戦は RR、それ以外は勝敗を大きく出す。
+function recentList(matches) {
   const list = element("ol", "recent");
   const format = new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
-  for (const point of [...history].reverse().slice(0, 8)) {
+  for (const entry of matches.slice(0, 8)) {
     const item = element("li");
     item.title = "振り返りを開く";
-    if (point.match_id) {
-      item.classList.add("is-link");
-      item.tabIndex = 0;
-      item.setAttribute("role", "button");
-      const open = () => openReviewFromHome(point.match_id);
-      item.addEventListener("click", open);
-      item.addEventListener("keydown", (event) => { if (event.key === "Enter") open(); });
-    }
-    const thumbnail = picture(images.maps[point.map]?.thumbnail);
+    item.classList.add("is-link");
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    const open = () => openReviewFromHome(entry.match_id);
+    item.addEventListener("click", open);
+    item.addEventListener("keydown", (event) => { if (event.key === "Enter") open(); });
+    const thumbnail = picture(images.maps[entry.map]?.thumbnail);
     if (thumbnail) item.append(thumbnail);
+    const [outcome, outcomeClass] = matchOutcome(entry);
+    const detail = [entry.mode, entry.agent, entry.acs === null ? null : `ACS ${entry.acs}`].filter(Boolean).join(" / ");
     item.append(
-      element("span", "", point.map ?? "マップ不明"),
-      element("span", signClass(point.earned), `${formatSigned(point.earned)} RR`),
-      element("small", "", format.format(new Date(point.at_ms))),
+      element("span", "", entry.map ?? entry.mode ?? "試合"),
+      element("span", outcomeClass, outcome),
+      element("small", "", `${format.format(new Date(entry.at_ms))}${detail ? `  ${detail}` : ""}`),
     );
     list.append(item);
   }
@@ -163,7 +171,7 @@ function renderHome(view, profile) {
 
   const home = element("div", "home");
   if (profile.history.length < 2) {
-    home.append(noticeBox("推移を表示するには試合が足りません", "コンペティティブを2試合遊ぶと、ここに RR の推移が表示されます。"));
+    home.append(noticeBox("RR の推移はまだ表示できません", "コンペティティブを2試合遊ぶと、ここに RR の推移が表示されます。"));
   } else {
     const trend = element("section");
     const chart = createChart(profile.history);
@@ -172,14 +180,19 @@ function renderHome(view, profile) {
       chart.querySelector(".chart").classList.add("is-revealing");
     }
     trend.append(element("h2", "", `RR TREND / 直近${profile.history.length}試合`), chart);
-    const recent = element("section");
-    recent.append(element("h2", "", "RECENT / 最近の試合"), recentList(profile.history));
-    const repeated = element("div");
-    repeated.id = "tag-trend";
-    recent.append(repeated);
-    home.append(trend, recent);
-    loadTagTrend(repeated);
+    home.append(trend);
   }
+  const recent = element("section");
+  if (profile.matches.length > 0) {
+    recent.append(element("h2", "", `RECENT / 最近の${profile.matches.length}試合`), recentList(profile.matches));
+  } else if (profile.partial) {
+    recent.append(noticeBox("試合の記録を読み込めませんでした", "少し待ってから自動で取り直します。続く場合は設定の診断を実行してください。"));
+  }
+  const repeated = element("div");
+  repeated.id = "tag-trend";
+  recent.append(repeated);
+  home.append(recent);
+  loadTagTrend(repeated);
   view.replaceChildren(hero, home);
   if (reveal) wipeIn(rankTitle);
 }

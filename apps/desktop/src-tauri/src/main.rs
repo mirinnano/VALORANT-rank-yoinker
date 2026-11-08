@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clipper;
+mod desktop;
 mod discord;
+mod recorder;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::path::PathBuf;
@@ -32,10 +35,10 @@ const TAG_WINDOW: u32 = 30;
 const WINDOW_MAX: (f64, f64) = (1680.0, 1040.0);
 const WINDOW_SCREEN_RATIO: f64 = 0.92;
 
-struct AppState {
+pub(crate) struct AppState {
     latest: Mutex<AppEvent>,
-    database: PathBuf,
-    source: Arc<dyn RiotSource>,
+    pub(crate) database: PathBuf,
+    pub(crate) source: Arc<dyn RiotSource>,
     images: tokio::sync::OnceCell<ImageCatalog>,
     discord: Mutex<Sender<discord::Message>>,
     discord_connected: Arc<AtomicBool>,
@@ -110,7 +113,11 @@ async fn load_review(
 ) -> Result<Option<serde_json::Value>, String> {
     let to_text = |error: vry_core::error::Error| error.to_string();
     if let Some(cached) = open_store(&state)?.cached_review(&match_id).map_err(to_text)? {
-        return Ok(Some(cached));
+        // タイムラインを足す前に保存した振り返りは、作り直す。
+        let current = cached.pointer("/rounds/0").is_none_or(|round| round.get("timeline").is_some());
+        if current {
+            return Ok(Some(cached));
+        }
     }
 
     let source = state.source.clone();
@@ -308,6 +315,12 @@ fn start_engine(app: AppHandle, source: Arc<dyn RiotSource>, database: &std::pat
         while receiver.changed().await.is_ok() {
             let event = receiver.borrow_and_update().clone();
             *app.state::<AppState>().latest.lock().expect("latest event poisoned") = event.clone();
+            clipper::on_event(&app, &event);
+            let connected = matches!(event, AppEvent::Snapshot(_));
+            let desktop = app.state::<desktop::Desktop>();
+            if desktop.connected_now(connected) && desktop.settings().bring_to_front {
+                desktop::show_main(&app);
+            }
             push_presence(&app.state::<AppState>());
             let _ = app.emit(APP_EVENT, event);
         }
@@ -317,11 +330,35 @@ fn start_engine(app: AppHandle, source: Arc<dyn RiotSource>, database: &std::pat
 
 fn main() {
     tauri::Builder::default()
+        // 二重起動したら、既存のウィンドウを前面に出す。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| desktop::show_main(app)))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![desktop::HIDDEN_ARG]),
+        ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .on_window_event(|window, event| {
+            // 閉じるボタンではトレイへしまう。終了はトレイのメニューから。
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.app_handle().state::<desktop::Desktop>().settings().close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             init_logging(&data_dir);
+            app.manage(desktop::Desktop::load(&data_dir));
+            let videos = app.path().video_dir().unwrap_or_else(|_| data_dir.clone());
+            app.manage(clipper::Clipper::new(videos));
+            if let Err(error) = clipper::register_hotkey(app.handle()) {
+                tracing::warn!(%error, "ホットキーの登録に失敗");
+            }
             let database = data_dir.join("encounters.db");
             let source = create_source()?;
 
@@ -338,8 +375,13 @@ fn main() {
             });
             if let Some(window) = app.get_webview_window("main") {
                 fit_window(&window)?;
+                if !desktop::started_hidden() {
+                    window.show()?;
+                }
             }
+            desktop::build_tray(app.handle())?;
             start_engine(app.handle().clone(), source, &database)?;
+            desktop::check_update_in_background(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -362,7 +404,19 @@ fn main() {
             review_notes,
             save_review_note,
             reviewed_matches,
-            tag_trend
+            tag_trend,
+            desktop::desktop_settings,
+            desktop::set_desktop_settings,
+            desktop::set_autostart,
+            desktop::check_update,
+            desktop::install_update,
+            clipper::list_recordings,
+            clipper::recording_active,
+            clipper::set_recording_offset,
+            clipper::export_clip,
+            clipper::delete_recording,
+            clipper::export_share_clip,
+            clipper::reveal_file
         ])
         .run(tauri::generate_context!())
         .expect("アプリの起動に失敗しました");
